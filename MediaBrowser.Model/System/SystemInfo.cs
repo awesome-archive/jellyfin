@@ -1,3 +1,6 @@
+#nullable disable
+#pragma warning disable CS1591
+
 using System;
 using System.Runtime.InteropServices;
 using MediaBrowser.Model.Updates;
@@ -5,22 +8,33 @@ using MediaBrowser.Model.Updates;
 namespace MediaBrowser.Model.System
 {
     /// <summary>
-    /// Class SystemInfo
+    /// Enum describing the location of the FFmpeg tool.
+    /// </summary>
+    public enum FFmpegLocation
+    {
+        /// <summary>No path to FFmpeg found.</summary>
+        NotFound,
+
+        /// <summary>Path supplied via command line using switch --ffmpeg.</summary>
+        SetByArgument,
+
+        /// <summary>User has supplied path via Transcoding UI page.</summary>
+        Custom,
+
+        /// <summary>FFmpeg tool found on system $PATH.</summary>
+        System
+    }
+
+    /// <summary>
+    /// Class SystemInfo.
     /// </summary>
     public class SystemInfo : PublicSystemInfo
     {
-        public PackageVersionClass SystemUpdateLevel { get; set; }
-
         /// <summary>
         /// Gets or sets the display name of the operating system.
         /// </summary>
         /// <value>The display name of the operating system.</value>
         public string OperatingSystemDisplayName { get; set; }
-
-        /// <summary>
-        /// The product name. This is the AssemblyProduct name.
-        /// </summary>
-        public string ProductName { get; set; }
 
         /// <summary>
         /// Get or sets the package name.
@@ -60,12 +74,6 @@ namespace MediaBrowser.Model.System
         /// <value><c>true</c> if this instance can self restart; otherwise, <c>false</c>.</value>
         public bool CanSelfRestart { get; set; }
 
-        /// <summary>
-        /// Gets or sets a value indicating whether this instance can self update.
-        /// </summary>
-        /// <value><c>true</c> if this instance can self update; otherwise, <c>false</c>.</value>
-        public bool CanSelfUpdate { get; set; }
-
         public bool CanLaunchWebBrowser { get; set; }
 
         /// <summary>
@@ -73,6 +81,12 @@ namespace MediaBrowser.Model.System
         /// </summary>
         /// <value>The program data path.</value>
         public string ProgramDataPath { get; set; }
+
+        /// <summary>
+        /// Gets or sets the web UI resources path.
+        /// </summary>
+        /// <value>The web UI resources path.</value>
+        public string WebPath { get; set; }
 
         /// <summary>
         /// Gets or sets the items by name path.
@@ -99,28 +113,10 @@ namespace MediaBrowser.Model.System
         public string InternalMetadataPath { get; set; }
 
         /// <summary>
-        /// Gets or sets the transcoding temporary path.
+        /// Gets or sets the transcode path.
         /// </summary>
-        /// <value>The transcoding temporary path.</value>
+        /// <value>The transcode path.</value>
         public string TranscodingTempPath { get; set; }
-
-        /// <summary>
-        /// Gets or sets the HTTP server port number.
-        /// </summary>
-        /// <value>The HTTP server port number.</value>
-        public int HttpServerPortNumber { get; set; }
-
-        /// <summary>
-        /// Gets or sets a value indicating whether [enable HTTPS].
-        /// </summary>
-        /// <value><c>true</c> if [enable HTTPS]; otherwise, <c>false</c>.</value>
-        public bool SupportsHttps { get; set; }
-
-        /// <summary>
-        /// Gets or sets the HTTPS server port number.
-        /// </summary>
-        /// <value>The HTTPS server port number.</value>
-        public int HttpsPortNumber { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance has update available.
@@ -128,7 +124,7 @@ namespace MediaBrowser.Model.System
         /// <value><c>true</c> if this instance has update available; otherwise, <c>false</c>.</value>
         public bool HasUpdateAvailable { get; set; }
 
-        public string EncoderLocationType { get; set; }
+        public FFmpegLocation EncoderLocation { get; set; }
 
         public Architecture SystemArchitecture { get; set; }
 

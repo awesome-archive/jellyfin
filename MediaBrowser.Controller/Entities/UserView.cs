@@ -1,50 +1,54 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using MediaBrowser.Controller.Playlists;
+using Jellyfin.Data.Entities;
 using MediaBrowser.Controller.TV;
 using MediaBrowser.Model.Querying;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
     public class UserView : Folder, IHasCollectionType
     {
+        /// <inheritdoc />
         public string ViewType { get; set; }
+
+        /// <inheritdoc />
         public new Guid DisplayParentId { get; set; }
 
+        /// <inheritdoc />
         public Guid? UserId { get; set; }
 
         public static ITVSeriesManager TVSeriesManager;
-        public static IPlaylistManager PlaylistManager;
 
-        [IgnoreDataMember]
+        /// <inheritdoc />
+        [JsonIgnore]
         public string CollectionType => ViewType;
 
+        /// <inheritdoc />
         public override IEnumerable<Guid> GetIdsForAncestorQuery()
         {
-            var list = new List<Guid>();
-
             if (!DisplayParentId.Equals(Guid.Empty))
             {
-                list.Add(DisplayParentId);
+                yield return DisplayParentId;
             }
             else if (!ParentId.Equals(Guid.Empty))
             {
-                list.Add(ParentId);
+                yield return ParentId;
             }
             else
             {
-                list.Add(Id);
+                yield return Id;
             }
-            return list;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPlayedStatus => false;
 
         public override int GetChildCount(User user)
@@ -65,7 +69,7 @@ namespace MediaBrowser.Controller.Entities
                 parent = LibraryManager.GetItemById(ParentId) as Folder ?? parent;
             }
 
-            return new UserViewBuilder(UserViewManager, LibraryManager, Logger, UserDataManager, TVSeriesManager, ConfigurationManager, PlaylistManager)
+            return new UserViewBuilder(UserViewManager, LibraryManager, Logger, UserDataManager, TVSeriesManager, ConfigurationManager)
                 .GetUserItems(parent, this, CollectionType, query);
         }
 
@@ -109,7 +113,7 @@ namespace MediaBrowser.Controller.Entities
 
         private static string[] UserSpecificViewTypes = new string[]
             {
-                MediaBrowser.Model.Entities.CollectionType.Playlists
+                Model.Entities.CollectionType.Playlists
             };
 
         public static bool IsUserSpecific(Folder folder)
@@ -138,8 +142,8 @@ namespace MediaBrowser.Controller.Entities
 
         private static string[] ViewTypesEligibleForGrouping = new string[]
             {
-                MediaBrowser.Model.Entities.CollectionType.Movies,
-                MediaBrowser.Model.Entities.CollectionType.TvShows,
+                Model.Entities.CollectionType.Movies,
+                Model.Entities.CollectionType.TvShows,
                 string.Empty
             };
 
@@ -150,12 +154,12 @@ namespace MediaBrowser.Controller.Entities
 
         private static string[] OriginalFolderViewTypes = new string[]
             {
-                MediaBrowser.Model.Entities.CollectionType.Books,
-                MediaBrowser.Model.Entities.CollectionType.MusicVideos,
-                MediaBrowser.Model.Entities.CollectionType.HomeVideos,
-                MediaBrowser.Model.Entities.CollectionType.Photos,
-                MediaBrowser.Model.Entities.CollectionType.Music,
-                MediaBrowser.Model.Entities.CollectionType.BoxSets
+                Model.Entities.CollectionType.Books,
+                Model.Entities.CollectionType.MusicVideos,
+                Model.Entities.CollectionType.HomeVideos,
+                Model.Entities.CollectionType.Photos,
+                Model.Entities.CollectionType.Music,
+                Model.Entities.CollectionType.BoxSets
             };
 
         public static bool EnableOriginalFolder(string viewType)
@@ -168,7 +172,7 @@ namespace MediaBrowser.Controller.Entities
             return Task.CompletedTask;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPeople => false;
     }
 }

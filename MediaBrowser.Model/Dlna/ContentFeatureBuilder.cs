@@ -1,5 +1,9 @@
+#nullable disable
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using MediaBrowser.Model.MediaInfo;
 
 namespace MediaBrowser.Model.Dlna
@@ -13,7 +17,8 @@ namespace MediaBrowser.Model.Dlna
             _profile = profile;
         }
 
-        public string BuildImageHeader(string container,
+        public string BuildImageHeader(
+            string container,
             int? width,
             int? height,
             bool isDirectStream,
@@ -28,16 +33,19 @@ namespace MediaBrowser.Model.Dlna
                             DlnaFlags.InteractiveTransferMode |
                             DlnaFlags.DlnaV15;
 
-            string dlnaflags = string.Format(";DLNA.ORG_FLAGS={0}",
-             DlnaMaps.FlagsToString(flagValue));
+            string dlnaflags = string.Format(
+                CultureInfo.InvariantCulture,
+                ";DLNA.ORG_FLAGS={0}",
+                DlnaMaps.FlagsToString(flagValue));
 
-            ResponseProfile mediaProfile = _profile.GetImageMediaProfile(container,
+            ResponseProfile mediaProfile = _profile.GetImageMediaProfile(
+                container,
                 width,
                 height);
 
             if (string.IsNullOrEmpty(orgPn))
             {
-                orgPn = mediaProfile == null ? null : mediaProfile.OrgPn;
+                orgPn = mediaProfile?.OrgPn;
             }
 
             if (string.IsNullOrEmpty(orgPn))
@@ -50,7 +58,8 @@ namespace MediaBrowser.Model.Dlna
             return (contentFeatures + orgOp + orgCi + dlnaflags).Trim(';');
         }
 
-        public string BuildAudioHeader(string container,
+        public string BuildAudioHeader(
+            string container,
             string audioCodec,
             int? audioBitrate,
             int? audioSampleRate,
@@ -71,26 +80,29 @@ namespace MediaBrowser.Model.Dlna
                             DlnaFlags.InteractiveTransferMode |
                             DlnaFlags.DlnaV15;
 
-            //if (isDirectStream)
+            // if (isDirectStream)
             //{
             //    flagValue = flagValue | DlnaFlags.ByteBasedSeek;
             //}
-            //else if (runtimeTicks.HasValue)
+            // else if (runtimeTicks.HasValue)
             //{
             //    flagValue = flagValue | DlnaFlags.TimeBasedSeek;
             //}
 
-            string dlnaflags = string.Format(";DLNA.ORG_FLAGS={0}",
-             DlnaMaps.FlagsToString(flagValue));
+            string dlnaflags = string.Format(
+                CultureInfo.InvariantCulture,
+                ";DLNA.ORG_FLAGS={0}",
+                DlnaMaps.FlagsToString(flagValue));
 
-            ResponseProfile mediaProfile = _profile.GetAudioMediaProfile(container,
+            ResponseProfile mediaProfile = _profile.GetAudioMediaProfile(
+                container,
                 audioCodec,
                 audioChannels,
                 audioBitrate,
                 audioSampleRate,
                 audioBitDepth);
 
-            string orgPn = mediaProfile == null ? null : mediaProfile.OrgPn;
+            string orgPn = mediaProfile?.OrgPn;
 
             if (string.IsNullOrEmpty(orgPn))
             {
@@ -102,7 +114,8 @@ namespace MediaBrowser.Model.Dlna
             return (contentFeatures + orgOp + orgCi + dlnaflags).Trim(';');
         }
 
-        public List<string> BuildVideoHeader(string container,
+        public List<string> BuildVideoHeader(
+            string container,
             string videoCodec,
             string audioCodec,
             int? width,
@@ -136,19 +149,20 @@ namespace MediaBrowser.Model.Dlna
                             DlnaFlags.InteractiveTransferMode |
                             DlnaFlags.DlnaV15;
 
-            //if (isDirectStream)
+            // if (isDirectStream)
             //{
             //    flagValue = flagValue | DlnaFlags.ByteBasedSeek;
             //}
-            //else if (runtimeTicks.HasValue)
+            // else if (runtimeTicks.HasValue)
             //{
             //    flagValue = flagValue | DlnaFlags.TimeBasedSeek;
             //}
 
-            string dlnaflags = string.Format(";DLNA.ORG_FLAGS={0}",
+            string dlnaflags = string.Format(CultureInfo.InvariantCulture, ";DLNA.ORG_FLAGS={0}",
              DlnaMaps.FlagsToString(flagValue));
 
-            ResponseProfile mediaProfile = _profile.GetVideoMediaProfile(container,
+            ResponseProfile mediaProfile = _profile.GetVideoMediaProfile(
+                container,
                 audioCodec,
                 videoCodec,
                 width,
@@ -172,7 +186,7 @@ namespace MediaBrowser.Model.Dlna
 
             if (mediaProfile != null && !string.IsNullOrEmpty(mediaProfile.OrgPn))
             {
-                orgPnValues.AddRange(mediaProfile.OrgPn.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries));
+                orgPnValues.AddRange(mediaProfile.OrgPn.Split(',', StringSplitOptions.RemoveEmptyEntries));
             }
             else
             {
@@ -206,20 +220,22 @@ namespace MediaBrowser.Model.Dlna
             return contentFeatureList;
         }
 
-        private string GetImageOrgPnValue(string container, int? width, int? height)
+        private static string GetImageOrgPnValue(string container, int? width, int? height)
         {
             MediaFormatProfile? format = new MediaFormatProfileResolver()
-                .ResolveImageFormat(container,
+                .ResolveImageFormat(
+                container,
                 width,
                 height);
 
             return format.HasValue ? format.Value.ToString() : null;
         }
 
-        private string GetAudioOrgPnValue(string container, int? audioBitrate, int? audioSampleRate, int? audioChannels)
+        private static string GetAudioOrgPnValue(string container, int? audioBitrate, int? audioSampleRate, int? audioChannels)
         {
             MediaFormatProfile? format = new MediaFormatProfileResolver()
-                .ResolveAudioFormat(container,
+                .ResolveAudioFormat(
+                container,
                 audioBitrate,
                 audioSampleRate,
                 audioChannels);
@@ -227,7 +243,7 @@ namespace MediaBrowser.Model.Dlna
             return format.HasValue ? format.Value.ToString() : null;
         }
 
-        private string[] GetVideoOrgPnValue(string container, string videoCodec, string audioCodec, int? width, int? height, TransportStreamTimestamp timestamp)
+        private static string[] GetVideoOrgPnValue(string container, string videoCodec, string audioCodec, int? width, int? height, TransportStreamTimestamp timestamp)
         {
             return new MediaFormatProfileResolver().ResolveVideoFormat(container, videoCodec, audioCodec, width, height, timestamp);
         }

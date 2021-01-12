@@ -1,3 +1,5 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -5,7 +7,6 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
-using MediaBrowser.Model.Extensions;
 using MediaBrowser.Model.MediaInfo;
 
 namespace MediaBrowser.MediaEncoding.Subtitles
@@ -14,6 +15,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
     {
         private readonly CultureInfo _usCulture = new CultureInfo("en-US");
 
+        /// <inheritdoc />
         public SubtitleTrackInfo Parse(Stream stream, CancellationToken cancellationToken)
         {
             var trackInfo = new SubtitleTrackInfo();
@@ -22,8 +24,10 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             using (var reader = new StreamReader(stream))
             {
                 string line;
-                while (reader.ReadLine() != "[Events]")
-                { }
+                while (!string.Equals(reader.ReadLine(), "[Events]", StringComparison.Ordinal))
+                {
+                }
+
                 var headers = ParseFieldHeaders(reader.ReadLine());
 
                 while ((line = reader.ReadLine()) != null)
@@ -34,18 +38,21 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                     {
                         continue;
                     }
-                    if (line.StartsWith("["))
+
+                    if (line[0] == '[')
+                    {
                         break;
-                    if (string.IsNullOrEmpty(line))
-                        continue;
+                    }
+
                     var subEvent = new SubtitleTrackEvent { Id = eventIndex.ToString(_usCulture) };
                     eventIndex++;
-                    var sections = line.Substring(10).Split(',');
+                    const string Dialogue = "Dialogue: ";
+                    var sections = line.Substring(Dialogue.Length).Split(',');
 
                     subEvent.StartPositionTicks = GetTicks(sections[headers["Start"]]);
                     subEvent.EndPositionTicks = GetTicks(sections[headers["End"]]);
 
-                    subEvent.Text = string.Join(",", sections.Skip(headers["Text"]));
+                    subEvent.Text = string.Join(',', sections[headers["Text"]..]);
                     RemoteNativeFormatting(subEvent);
 
                     subEvent.Text = subEvent.Text.Replace("\\n", ParserValues.NewLine, StringComparison.OrdinalIgnoreCase);
@@ -55,36 +62,35 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                     trackEvents.Add(subEvent);
                 }
             }
-            trackInfo.TrackEvents = trackEvents.ToArray();
+
+            trackInfo.TrackEvents = trackEvents;
             return trackInfo;
         }
 
-        long GetTicks(string time)
+        private long GetTicks(ReadOnlySpan<char> time)
         {
             return TimeSpan.TryParseExact(time, @"h\:mm\:ss\.ff", _usCulture, out var span)
                 ? span.Ticks : 0;
         }
 
-        private Dictionary<string, int> ParseFieldHeaders(string line)
+        internal static Dictionary<string, int> ParseFieldHeaders(string line)
         {
-            var fields = line.Substring(8).Split(',').Select(x => x.Trim()).ToList();
+            const string Format = "Format: ";
+            var fields = line.Substring(Format.Length).Split(',').Select(x => x.Trim()).ToList();
 
-            var result = new Dictionary<string, int> {
-                                                         {"Start", fields.IndexOf("Start")},
-                                                         {"End", fields.IndexOf("End")},
-                                                         {"Text", fields.IndexOf("Text")}
-                                                     };
-            return result;
+            return new Dictionary<string, int>
+            {
+                { "Start", fields.IndexOf("Start") },
+                { "End", fields.IndexOf("End") },
+                { "Text", fields.IndexOf("Text") }
+            };
         }
 
-        /// <summary>
-        /// Credit: https://github.com/SubtitleEdit/subtitleedit/blob/master/src/Logic/SubtitleFormats/AdvancedSubStationAlpha.cs
-        /// </summary>
         private void RemoteNativeFormatting(SubtitleTrackEvent p)
         {
-            int indexOfBegin = p.Text.IndexOf('{');
+            int indexOfBegin = p.Text.IndexOf('{', StringComparison.Ordinal);
             string pre = string.Empty;
-            while (indexOfBegin >= 0 && p.Text.IndexOf('}') > indexOfBegin)
+            while (indexOfBegin >= 0 && p.Text.IndexOf('}', StringComparison.Ordinal) > indexOfBegin)
             {
                 string s = p.Text.Substring(indexOfBegin);
                 if (s.StartsWith("{\\an1}", StringComparison.Ordinal) ||
@@ -111,11 +117,13 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 {
                     pre = s.Substring(0, 5) + "}";
                 }
-                int indexOfEnd = p.Text.IndexOf('}');
+
+                int indexOfEnd = p.Text.IndexOf('}', StringComparison.Ordinal);
                 p.Text = p.Text.Remove(indexOfBegin, (indexOfEnd - indexOfBegin) + 1);
 
-                indexOfBegin = p.Text.IndexOf('{');
+                indexOfBegin = p.Text.IndexOf('{', StringComparison.Ordinal);
             }
+
             p.Text = pre + p.Text;
         }
     }

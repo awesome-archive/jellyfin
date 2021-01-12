@@ -1,15 +1,20 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Entities;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Playlists
 {
@@ -33,7 +38,7 @@ namespace MediaBrowser.Controller.Playlists
             Shares = Array.Empty<Share>();
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsFile => IsPlaylistFile(Path);
 
         public static bool IsPlaylistFile(string path)
@@ -41,7 +46,7 @@ namespace MediaBrowser.Controller.Playlists
             return System.IO.Path.HasExtension(path);
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string ContainingFolderPath
         {
             get
@@ -57,19 +62,19 @@ namespace MediaBrowser.Controller.Playlists
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         protected override bool FilterLinkedChildrenPerUser => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPlayedStatus => string.Equals(MediaType, "Video", StringComparison.OrdinalIgnoreCase);
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool AlwaysScanInternalMetadataPath => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsCumulativeRunTimeTicks => true;
 
         public override double GetDefaultPrimaryImageAspectRatio()
@@ -155,7 +160,7 @@ namespace MediaBrowser.Controller.Playlists
                 return LibraryManager.GetItemList(new InternalItemsQuery(user)
                 {
                     Recursive = true,
-                    IncludeItemTypes = new[] { typeof(Audio).Name },
+                    IncludeItemTypes = new[] { nameof(Audio) },
                     GenreIds = new[] { musicGenre.Id },
                     OrderBy = new[] { ItemSortBy.AlbumArtist, ItemSortBy.Album, ItemSortBy.SortName }.Select(i => new ValueTuple<string, SortOrder>(i, SortOrder.Ascending)).ToArray(),
                     DtoOptions = options
@@ -167,7 +172,7 @@ namespace MediaBrowser.Controller.Playlists
                 return LibraryManager.GetItemList(new InternalItemsQuery(user)
                 {
                     Recursive = true,
-                    IncludeItemTypes = new[] { typeof(Audio).Name },
+                    IncludeItemTypes = new[] { nameof(Audio) },
                     ArtistIds = new[] { musicArtist.Id },
                     OrderBy = new[] { ItemSortBy.AlbumArtist, ItemSortBy.Album, ItemSortBy.SortName }.Select(i => new ValueTuple<string, SortOrder>(i, SortOrder.Ascending)).ToArray(),
                     DtoOptions = options
@@ -180,7 +185,7 @@ namespace MediaBrowser.Controller.Playlists
                 {
                     Recursive = true,
                     IsFolder = false,
-                    OrderBy = new[] { ItemSortBy.SortName }.Select(i => new ValueTuple<string, SortOrder>(i, SortOrder.Ascending)).ToArray(),
+                    OrderBy = new[] { (ItemSortBy.SortName, SortOrder.Ascending) },
                     MediaTypes = new[] { mediaType },
                     EnableTotalRecordCount = false,
                     DtoOptions = options
@@ -192,12 +197,12 @@ namespace MediaBrowser.Controller.Playlists
             return new[] { item };
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool IsPreSorted => true;
 
         public string PlaylistMediaType { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string MediaType => PlaylistMediaType;
 
         public void SetMediaType(string value)
@@ -205,7 +210,7 @@ namespace MediaBrowser.Controller.Playlists
             PlaylistMediaType = value;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         private bool IsSharedItem
         {
             get
@@ -239,16 +244,8 @@ namespace MediaBrowser.Controller.Playlists
                 return base.IsVisible(user);
             }
 
-            var userId = user.Id.ToString("N");
-            foreach (var share in shares)
-            {
-                if (string.Equals(share.UserId, userId, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            var userId = user.Id.ToString("N", CultureInfo.InvariantCulture);
+            return shares.Any(share => string.Equals(share.UserId, userId, StringComparison.OrdinalIgnoreCase));
         }
 
         public override bool IsVisibleStandalone(User user)

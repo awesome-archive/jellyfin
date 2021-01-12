@@ -1,11 +1,12 @@
 using System;
 using System.Linq;
+using MediaBrowser.Common.Extensions;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Controller.Entities
 {
     /// <summary>
-    /// Class Extensions
+    /// Class Extensions.
     /// </summary>
     public static class Extensions
     {
@@ -28,13 +29,17 @@ namespace MediaBrowser.Controller.Entities
                     Url = url
                 };
 
-                if (item.RemoteTrailers.Length == 0)
+                if (item.RemoteTrailers.Count == 0)
                 {
                     item.RemoteTrailers = new[] { mediaUrl };
                 }
                 else
                 {
-                    item.RemoteTrailers = item.RemoteTrailers.Concat(new[] { mediaUrl }).ToArray();
+                    var oldIds = item.RemoteTrailers;
+                    var newIds = new MediaUrl[oldIds.Count + 1];
+                    oldIds.CopyTo(newIds);
+                    newIds[oldIds.Count] = mediaUrl;
+                    item.RemoteTrailers = newIds;
                 }
             }
         }

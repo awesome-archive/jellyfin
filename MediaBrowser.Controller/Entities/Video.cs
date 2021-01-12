@@ -1,47 +1,50 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
-using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
     /// <summary>
-    /// Class Video
+    /// Class Video.
     /// </summary>
     public class Video : BaseItem,
         IHasAspectRatio,
         ISupportsPlaceHolders,
         IHasMediaSources
     {
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string PrimaryVersionId { get; set; }
 
         public string[] AdditionalParts { get; set; }
+
         public string[] LocalAlternateVersions { get; set; }
+
         public LinkedChild[] LinkedAlternateVersions { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPlayedStatus => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPeople => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPositionTicksResume
         {
             get
@@ -53,15 +56,18 @@ namespace MediaBrowser.Controller.Entities
                     {
                         return false;
                     }
+
                     if (extraType.Value == Model.Entities.ExtraType.ThemeVideo)
                     {
                         return false;
                     }
+
                     if (extraType.Value == Model.Entities.ExtraType.Trailer)
                     {
                         return false;
                     }
                 }
+
                 return true;
             }
         }
@@ -90,7 +96,7 @@ namespace MediaBrowser.Controller.Entities
             return base.CreatePresentationUniqueKey();
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsThemeMedia => true;
 
         /// <summary>
@@ -137,25 +143,6 @@ namespace MediaBrowser.Controller.Entities
         /// <value>The video3 D format.</value>
         public Video3DFormat? Video3DFormat { get; set; }
 
-        public string[] GetPlayableStreamFileNames(IMediaEncoder mediaEncoder)
-        {
-            var videoType = VideoType;
-
-            if (videoType == VideoType.Iso && IsoType == Model.Entities.IsoType.BluRay)
-            {
-                videoType = VideoType.BluRay;
-            }
-            else if (videoType == VideoType.Iso && IsoType == Model.Entities.IsoType.Dvd)
-            {
-                videoType = VideoType.Dvd;
-            }
-            else
-            {
-                return Array.Empty<string>();
-            }
-            return mediaEncoder.GetPlayableStreamFileNames(Path, videoType);
-        }
-
         /// <summary>
         /// Gets or sets the aspect ratio.
         /// </summary>
@@ -167,7 +154,7 @@ namespace MediaBrowser.Controller.Entities
             AdditionalParts = Array.Empty<string>();
             LocalAlternateVersions = Array.Empty<string>();
             SubtitleFiles = Array.Empty<string>();
-            LinkedAlternateVersions = EmptyLinkedChildArray;
+            LinkedAlternateVersions = Array.Empty<LinkedChild>();
         }
 
         public override bool CanDownload()
@@ -180,10 +167,10 @@ namespace MediaBrowser.Controller.Entities
             return IsFileProtocol;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsAddingToPlaylist => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public int MediaSourceCount
         {
             get
@@ -196,14 +183,15 @@ namespace MediaBrowser.Controller.Entities
                         return video.MediaSourceCount;
                     }
                 }
+
                 return LinkedAlternateVersions.Length + LocalAlternateVersions.Length + 1;
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsStacked => AdditionalParts.Length > 0;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool HasLocalAlternateVersions => LocalAlternateVersions.Length > 0;
 
         public IEnumerable<Guid> GetAdditionalPartIds()
@@ -218,7 +206,7 @@ namespace MediaBrowser.Controller.Entities
 
         public static ILiveTvManager LiveTvManager { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override SourceType SourceType
         {
             get
@@ -247,7 +235,7 @@ namespace MediaBrowser.Controller.Entities
             return base.CanDelete();
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsCompleteMedia
         {
             get
@@ -261,7 +249,7 @@ namespace MediaBrowser.Controller.Entities
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         protected virtual bool EnableDefaultVideoUserDataKeys => true;
 
         public override List<string> GetUserDataKeys()
@@ -272,13 +260,13 @@ namespace MediaBrowser.Controller.Entities
             {
                 if (ExtraType.HasValue)
                 {
-                    var key = this.GetProviderId(MetadataProviders.Tmdb);
+                    var key = this.GetProviderId(MetadataProvider.Tmdb);
                     if (!string.IsNullOrEmpty(key))
                     {
                         list.Insert(0, GetUserDataKey(key));
                     }
 
-                    key = this.GetProviderId(MetadataProviders.Imdb);
+                    key = this.GetProviderId(MetadataProvider.Imdb);
                     if (!string.IsNullOrEmpty(key))
                     {
                         list.Insert(0, GetUserDataKey(key));
@@ -286,13 +274,13 @@ namespace MediaBrowser.Controller.Entities
                 }
                 else
                 {
-                    var key = this.GetProviderId(MetadataProviders.Imdb);
+                    var key = this.GetProviderId(MetadataProvider.Imdb);
                     if (!string.IsNullOrEmpty(key))
                     {
                         list.Insert(0, key);
                     }
 
-                    key = this.GetProviderId(MetadataProviders.Tmdb);
+                    key = this.GetProviderId(MetadataProvider.Tmdb);
                     if (!string.IsNullOrEmpty(key))
                     {
                         list.Insert(0, key);
@@ -338,7 +326,7 @@ namespace MediaBrowser.Controller.Entities
                 .OrderBy(i => i.SortName);
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string ContainingFolderPath
         {
             get
@@ -360,7 +348,7 @@ namespace MediaBrowser.Controller.Entities
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string FileNameWithoutExtension
         {
             get
@@ -390,11 +378,13 @@ namespace MediaBrowser.Controller.Entities
                     AdditionalParts = newVideo.AdditionalParts;
                     updateType |= ItemUpdateType.MetadataImport;
                 }
+
                 if (!LocalAlternateVersions.SequenceEqual(newVideo.LocalAlternateVersions, StringComparer.Ordinal))
                 {
                     LocalAlternateVersions = newVideo.LocalAlternateVersions;
                     updateType |= ItemUpdateType.MetadataImport;
                 }
+
                 if (VideoType != newVideo.VideoType)
                 {
                     VideoType = newVideo.VideoType;
@@ -405,41 +395,18 @@ namespace MediaBrowser.Controller.Entities
             return updateType;
         }
 
-        public static string[] QueryPlayableStreamFiles(string rootPath, VideoType videoType)
-        {
-            if (videoType == VideoType.Dvd)
-            {
-                return FileSystem.GetFiles(rootPath, new[] { ".vob" }, false, true)
-                    .OrderByDescending(i => i.Length)
-                    .ThenBy(i => i.FullName)
-                    .Take(1)
-                    .Select(i => i.FullName)
-                    .ToArray();
-            }
-            if (videoType == VideoType.BluRay)
-            {
-                return FileSystem.GetFiles(rootPath, new[] { ".m2ts" }, false, true)
-                    .OrderByDescending(i => i.Length)
-                    .ThenBy(i => i.FullName)
-                    .Take(1)
-                    .Select(i => i.FullName)
-                    .ToArray();
-            }
-            return Array.Empty<string>();
-        }
-
         /// <summary>
         /// Gets a value indicating whether [is3 D].
         /// </summary>
         /// <value><c>true</c> if [is3 D]; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool Is3D => Video3DFormat.HasValue;
 
         /// <summary>
         /// Gets the type of the media.
         /// </summary>
         /// <value>The type of the media.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string MediaType => Model.Entities.MediaType.Video;
 
         protected override async Task<bool> RefreshedOwnedItems(MetadataRefreshOptions options, List<FileSystemMetadata> fileSystemChildren, CancellationToken cancellationToken)
@@ -485,9 +452,10 @@ namespace MediaBrowser.Controller.Entities
             }
         }
 
-        public override void UpdateToRepository(ItemUpdateType updateReason, CancellationToken cancellationToken)
+        /// <inheritdoc />
+        public override async Task UpdateToRepositoryAsync(ItemUpdateType updateReason, CancellationToken cancellationToken)
         {
-            base.UpdateToRepository(updateReason, cancellationToken);
+            await base.UpdateToRepositoryAsync(updateReason, cancellationToken).ConfigureAwait(false);
 
             var localAlternates = GetLocalAlternateVersionIds()
                 .Select(i => LibraryManager.GetItemById(i))
@@ -504,7 +472,7 @@ namespace MediaBrowser.Controller.Entities
                 item.Genres = Genres;
                 item.ProviderIds = ProviderIds;
 
-                item.UpdateToRepository(ItemUpdateType.MetadataDownload, cancellationToken);
+                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataDownload, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -535,7 +503,6 @@ namespace MediaBrowser.Controller.Entities
             {
                 ItemId = Id,
                 Index = DefaultVideoStreamIndex.Value
-
             }).FirstOrDefault();
         }
 

@@ -1,6 +1,9 @@
+#pragma warning disable CS1591
+
 using System.Collections.Generic;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Model.Dlna;
+using Microsoft.AspNetCore.Http;
 
 namespace MediaBrowser.Controller.Dlna
 {
@@ -17,7 +20,7 @@ namespace MediaBrowser.Controller.Dlna
         /// </summary>
         /// <param name="headers">The headers.</param>
         /// <returns>DeviceProfile.</returns>
-        DeviceProfile GetProfile(IDictionary<string, string> headers);
+        DeviceProfile GetProfile(IHeaderDictionary headers);
 
         /// <summary>
         /// Gets the default profile.
@@ -64,7 +67,7 @@ namespace MediaBrowser.Controller.Dlna
         /// <param name="serverUuId">The server uu identifier.</param>
         /// <param name="serverAddress">The server address.</param>
         /// <returns>System.String.</returns>
-        string GetServerDescriptionXml(IDictionary<string, string> headers, string serverUuId, string serverAddress);
+        string GetServerDescriptionXml(IHeaderDictionary headers, string serverUuId, string serverAddress);
 
         /// <summary>
         /// Gets the icon.

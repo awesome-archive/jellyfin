@@ -1,3 +1,7 @@
+#nullable disable
+using System;
+using System.Xml.Serialization;
+
 namespace MediaBrowser.Model.Configuration
 {
     /// <summary>
@@ -7,22 +11,16 @@ namespace MediaBrowser.Model.Configuration
     /// </summary>
     public class BaseApplicationConfiguration
     {
-        // TODO: @bond Remove?
         /// <summary>
-        /// Gets or sets a value indicating whether [enable debug level logging].
+        /// Initializes a new instance of the <see cref="BaseApplicationConfiguration" /> class.
         /// </summary>
-        /// <value><c>true</c> if [enable debug level logging]; otherwise, <c>false</c>.</value>
-        public bool EnableDebugLevelLogging { get; set; }
+        public BaseApplicationConfiguration()
+        {
+            LogFileRetentionDays = 3;
+        }
 
         /// <summary>
-        /// Enable automatically and silently updating of the application
-        /// </summary>
-        /// <value><c>true</c> if [enable auto update]; otherwise, <c>false</c>.</value>
-        public bool EnableAutoUpdate { get; set; }
-
-        // TODO: @bond Remove?
-        /// <summary>
-        /// The number of days we should retain log files
+        /// Gets or sets the number of days we should retain log files.
         /// </summary>
         /// <value>The log file retention days.</value>
         public int LogFileRetentionDays { get; set; }
@@ -40,12 +38,27 @@ namespace MediaBrowser.Model.Configuration
         public string CachePath { get; set; }
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="BaseApplicationConfiguration" /> class.
+        /// Gets or sets the last known version that was ran using the configuration.
         /// </summary>
-        public BaseApplicationConfiguration()
+        /// <value>The version from previous run.</value>
+        [XmlIgnore]
+        public Version PreviousVersion { get; set; }
+
+        /// <summary>
+        /// Gets or sets the stringified PreviousVersion to be stored/loaded,
+        /// because System.Version itself isn't xml-serializable.
+        /// </summary>
+        /// <value>String value of PreviousVersion.</value>
+        public string PreviousVersionStr
         {
-            EnableAutoUpdate = true;
-            LogFileRetentionDays = 3;
+            get => PreviousVersion?.ToString();
+            set
+            {
+                if (Version.TryParse(value, out var version))
+                {
+                    PreviousVersion = version;
+                }
+            }
         }
     }
 }

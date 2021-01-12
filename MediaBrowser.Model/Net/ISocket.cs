@@ -1,4 +1,7 @@
+#pragma warning disable CS1591
+
 using System;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,18 +12,17 @@ namespace MediaBrowser.Model.Net
     /// </summary>
     public interface ISocket : IDisposable
     {
-        IpAddressInfo LocalIPAddress { get; }
+        IPAddress LocalIPAddress { get; }
 
         Task<SocketReceiveResult> ReceiveAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken);
 
-        int Receive(byte[] buffer, int offset, int count);
-
         IAsyncResult BeginReceive(byte[] buffer, int offset, int count, AsyncCallback callback);
+
         SocketReceiveResult EndReceive(IAsyncResult result);
 
         /// <summary>
         /// Sends a UDP message to a particular end point (uni or multicast).
         /// </summary>
-        Task SendToAsync(byte[] buffer, int offset, int bytes, IpEndPointInfo endPoint, CancellationToken cancellationToken);
+        Task SendToAsync(byte[] buffer, int offset, int bytes, IPEndPoint endPoint, CancellationToken cancellationToken);
     }
 }

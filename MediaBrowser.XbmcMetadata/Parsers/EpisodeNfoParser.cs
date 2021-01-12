@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -8,83 +7,76 @@ using System.Xml;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Parsers
 {
+    /// <summary>
+    /// Nfo parser for episodes.
+    /// </summary>
     public class EpisodeNfoParser : BaseNfoParser<Episode>
     {
-        public void Fetch(MetadataResult<Episode> item,
-            List<LocalImageInfo> images,
-            string metadataFile,
-            CancellationToken cancellationToken)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="EpisodeNfoParser"/> class.
+        /// </summary>
+        /// <param name="logger">The logger.</param>
+        /// <param name="config">the configuration manager.</param>
+        /// <param name="providerManager">The provider manager.</param>
+        public EpisodeNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager)
+            : base(logger, config, providerManager)
         {
-            Fetch(item, metadataFile, cancellationToken);
         }
 
-        private readonly CultureInfo UsCulture = new CultureInfo("en-US");
-
+        /// <inheritdoc />
         protected override void Fetch(MetadataResult<Episode> item, string metadataFile, XmlReaderSettings settings, CancellationToken cancellationToken)
         {
             using (var fileStream = File.OpenRead(metadataFile))
+            using (var streamReader = new StreamReader(fileStream, Encoding.UTF8))
             {
-                using (var streamReader = new StreamReader(fileStream, Encoding.UTF8))
+                item.ResetPeople();
+
+                var xml = streamReader.ReadToEnd();
+
+                var srch = "</episodedetails>";
+                var index = xml.IndexOf(srch, StringComparison.OrdinalIgnoreCase);
+
+                if (index != -1)
                 {
-                    item.ResetPeople();
+                    xml = xml.Substring(0, index + srch.Length);
+                }
 
-                    var xml = streamReader.ReadToEnd();
-
-                    var srch = "</episodedetails>";
-                    var index = xml.IndexOf(srch, StringComparison.OrdinalIgnoreCase);
-
-                    if (index != -1)
+                // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
+                try
+                {
+                    using (var stringReader = new StringReader(xml))
+                    using (var reader = XmlReader.Create(stringReader, settings))
                     {
-                        xml = xml.Substring(0, index + srch.Length);
-                    }
+                        reader.MoveToContent();
+                        reader.Read();
 
-                    // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
-                    try
-                    {
-                        using (var stringReader = new StringReader(xml))
+                        // Loop through each element
+                        while (!reader.EOF && reader.ReadState == ReadState.Interactive)
                         {
-                            // Use XmlReader for best performance
-                            using (var reader = XmlReader.Create(stringReader, settings))
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            if (reader.NodeType == XmlNodeType.Element)
                             {
-                                reader.MoveToContent();
+                                FetchDataFromXmlNode(reader, item);
+                            }
+                            else
+                            {
                                 reader.Read();
-
-                                // Loop through each element
-                                while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-                                {
-                                    cancellationToken.ThrowIfCancellationRequested();
-
-                                    if (reader.NodeType == XmlNodeType.Element)
-                                    {
-                                        FetchDataFromXmlNode(reader, item);
-                                    }
-                                    else
-                                    {
-                                        reader.Read();
-                                    }
-                                }
                             }
                         }
                     }
-                    catch (XmlException)
-                    {
-
-                    }
+                }
+                catch (XmlException)
+                {
                 }
             }
         }
 
-        /// <summary>
-        /// Fetches the data from XML node.
-        /// </summary>
-        /// <param name="reader">The reader.</param>
-        /// <param name="itemResult">The item result.</param>
+        /// <inheritdoc />
         protected override void FetchDataFromXmlNode(XmlReader reader, MetadataResult<Episode> itemResult)
         {
             var item = itemResult.Item;
@@ -102,6 +94,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                                 item.ParentIndexNumber = num;
                             }
                         }
+
                         break;
                     }
 
@@ -116,6 +109,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                                 item.IndexNumber = num;
                             }
                         }
+
                         break;
                     }
 
@@ -130,6 +124,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                                 item.IndexNumberEnd = num;
                             }
                         }
+
                         break;
                     }
 
@@ -139,7 +134,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
                         if (!string.IsNullOrWhiteSpace(val))
                         {
-                            // int.TryParse is local aware, so it can be probamatic, force us culture
+                            // int.TryParse is local aware, so it can be problematic, force us culture
                             if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
                             {
                                 item.AirsBeforeEpisodeNumber = rval;
@@ -155,7 +150,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
                         if (!string.IsNullOrWhiteSpace(val))
                         {
-                            // int.TryParse is local aware, so it can be probamatic, force us culture
+                            // int.TryParse is local aware, so it can be problematic, force us culture
                             if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
                             {
                                 item.AirsAfterSeasonNumber = rval;
@@ -171,7 +166,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
                         if (!string.IsNullOrWhiteSpace(val))
                         {
-                            // int.TryParse is local aware, so it can be probamatic, force us culture
+                            // int.TryParse is local aware, so it can be problematic, force us culture
                             if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
                             {
                                 item.AirsBeforeSeasonNumber = rval;
@@ -187,7 +182,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
                         if (!string.IsNullOrWhiteSpace(val))
                         {
-                            // int.TryParse is local aware, so it can be probamatic, force us culture
+                            // int.TryParse is local aware, so it can be problematic, force us culture
                             if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
                             {
                                 item.AirsBeforeSeasonNumber = rval;
@@ -203,7 +198,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
                         if (!string.IsNullOrWhiteSpace(val))
                         {
-                            // int.TryParse is local aware, so it can be probamatic, force us culture
+                            // int.TryParse is local aware, so it can be problematic, force us culture
                             if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
                             {
                                 item.AirsBeforeEpisodeNumber = rval;
@@ -213,15 +208,10 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                         break;
                     }
 
-
                 default:
                     base.FetchDataFromXmlNode(reader, itemResult);
                     break;
             }
-        }
-
-        public EpisodeNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager, IFileSystem fileSystem, IXmlReaderSettingsFactory xmlReaderSettingsFactory) : base(logger, config, providerManager, fileSystem, xmlReaderSettingsFactory)
-        {
         }
     }
 }

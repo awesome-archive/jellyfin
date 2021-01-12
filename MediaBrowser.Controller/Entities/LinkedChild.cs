@@ -1,21 +1,26 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json.Serialization;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
     public class LinkedChild
     {
         public string Path { get; set; }
+
         public LinkedChildType Type { get; set; }
+
         public string LibraryItemId { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string Id { get; set; }
 
         /// <summary>
-        /// Serves as a cache
+        /// Serves as a cache.
         /// </summary>
         public Guid? ItemId { get; set; }
 
@@ -29,7 +34,7 @@ namespace MediaBrowser.Controller.Entities
 
             if (string.IsNullOrEmpty(child.Path))
             {
-                child.LibraryItemId = item.Id.ToString("N");
+                child.LibraryItemId = item.Id.ToString("N", CultureInfo.InvariantCulture);
             }
 
             return child;
@@ -37,7 +42,7 @@ namespace MediaBrowser.Controller.Entities
 
         public LinkedChild()
         {
-            Id = Guid.NewGuid().ToString("N");
+            Id = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
         }
     }
 
@@ -62,6 +67,7 @@ namespace MediaBrowser.Controller.Entities
             {
                 return _fileSystem.AreEqual(x.Path, y.Path);
             }
+
             return false;
         }
 

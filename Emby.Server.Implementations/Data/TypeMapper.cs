@@ -1,33 +1,26 @@
 using System;
 using System.Collections.Concurrent;
 using System.Linq;
-using MediaBrowser.Model.Reflection;
 
 namespace Emby.Server.Implementations.Data
 {
     /// <summary>
-    /// Class TypeMapper
+    /// Class TypeMapper.
     /// </summary>
     public class TypeMapper
     {
-        private readonly IAssemblyInfo _assemblyInfo;
-
         /// <summary>
-        /// This holds all the types in the running assemblies so that we can de-serialize properly when we don't have strong types
+        /// This holds all the types in the running assemblies
+        /// so that we can de-serialize properly when we don't have strong types.
         /// </summary>
         private readonly ConcurrentDictionary<string, Type> _typeMap = new ConcurrentDictionary<string, Type>();
-
-        public TypeMapper(IAssemblyInfo assemblyInfo)
-        {
-            _assemblyInfo = assemblyInfo;
-        }
 
         /// <summary>
         /// Gets the type.
         /// </summary>
         /// <param name="typeName">Name of the type.</param>
         /// <returns>Type.</returns>
-        /// <exception cref="ArgumentNullException"></exception>
+        /// <exception cref="ArgumentNullException"><c>typeName</c> is null.</exception>
         public Type GetType(string typeName)
         {
             if (string.IsNullOrEmpty(typeName))
@@ -45,8 +38,7 @@ namespace Emby.Server.Implementations.Data
         /// <returns>Type.</returns>
         private Type LookupType(string typeName)
         {
-            return _assemblyInfo
-                .GetCurrentAssemblies()
+            return AppDomain.CurrentDomain.GetAssemblies()
                 .Select(a => a.GetType(typeName))
                 .FirstOrDefault(t => t != null);
         }

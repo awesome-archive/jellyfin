@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Text;
-using System.Threading.Tasks;
-using System.Xml;
 using Rssdp.Infrastructure;
 
 namespace Rssdp
@@ -18,19 +15,12 @@ namespace Rssdp
     /// <seealso cref="SsdpEmbeddedDevice"/>
     public abstract class SsdpDevice
     {
-
-        #region Fields
-
         private string _Udn;
         private string _DeviceType;
         private string _DeviceTypeNamespace;
         private int _DeviceVersion;
 
         private IList<SsdpDevice> _Devices;
-
-        #endregion
-
-        #region Events
 
         /// <summary>
         /// Raised when a new child device is added.
@@ -46,10 +36,6 @@ namespace Rssdp
         /// <seealso cref="DeviceRemoved"/>
         public event EventHandler<DeviceEventArgs> DeviceRemoved;
 
-        #endregion
-
-        #region Constructors
-
         /// <summary>
         /// Derived type constructor, allows constructing a device with no parent. Should only be used from derived types that are or inherit from <see cref="SsdpRootDevice"/>.
         /// </summary>
@@ -63,22 +49,18 @@ namespace Rssdp
             this.Devices = new ReadOnlyCollection<SsdpDevice>(_Devices);
         }
 
-        #endregion
-
         public SsdpRootDevice ToRootDevice()
         {
             var device = this;
 
             var rootDevice = device as SsdpRootDevice;
             if (rootDevice == null)
+            {
                 rootDevice = ((SsdpEmbeddedDevice)device).RootDevice;
+            }
 
             return rootDevice;
         }
-
-        #region Public Properties
-
-        #region UPnP Device Description Properties
 
         /// <summary>
         /// Sets or returns the core device type (not including namespace, version etc.). Required.
@@ -93,6 +75,7 @@ namespace Rssdp
             {
                 return _DeviceType;
             }
+
             set
             {
                 _DeviceType = value;
@@ -114,6 +97,7 @@ namespace Rssdp
             {
                 return _DeviceTypeNamespace;
             }
+
             set
             {
                 _DeviceTypeNamespace = value;
@@ -133,6 +117,7 @@ namespace Rssdp
             {
                 return _DeviceVersion;
             }
+
             set
             {
                 _DeviceVersion = value;
@@ -180,10 +165,15 @@ namespace Rssdp
             get
             {
                 if (String.IsNullOrEmpty(_Udn) && !String.IsNullOrEmpty(this.Uuid))
+                {
                     return "uuid:" + this.Uuid;
+                }
                 else
+                {
                     return _Udn;
+                }
             }
+
             set
             {
                 _Udn = value;
@@ -251,8 +241,6 @@ namespace Rssdp
         /// </remarks>
         public Uri PresentationUrl { get; set; }
 
-        #endregion
-
         /// <summary>
         /// Returns a read-only enumerable set of <see cref="SsdpDevice"/> objects representing children of this device. Child devices are optional.
         /// </summary>
@@ -263,10 +251,6 @@ namespace Rssdp
             get;
             private set;
         }
-
-        #endregion
-
-        #region Public Methods
 
         /// <summary>
         /// Adds a child device to the <see cref="Devices"/> collection.
@@ -281,9 +265,20 @@ namespace Rssdp
         /// <seealso cref="DeviceAdded"/>
         public void AddDevice(SsdpEmbeddedDevice device)
         {
-            if (device == null) throw new ArgumentNullException(nameof(device));
-            if (device.RootDevice != null && device.RootDevice != this.ToRootDevice()) throw new InvalidOperationException("This device is already associated with a different root device (has been added as a child in another branch).");
-            if (device == this) throw new InvalidOperationException("Can't add device to itself.");
+            if (device == null)
+            {
+                throw new ArgumentNullException(nameof(device));
+            }
+
+            if (device.RootDevice != null && device.RootDevice != this.ToRootDevice())
+            {
+                throw new InvalidOperationException("This device is already associated with a different root device (has been added as a child in another branch).");
+            }
+
+            if (device == this)
+            {
+                throw new InvalidOperationException("Can't add device to itself.");
+            }
 
             bool wasAdded = false;
             lock (_Devices)
@@ -294,7 +289,9 @@ namespace Rssdp
             }
 
             if (wasAdded)
+            {
                 OnDeviceAdded(device);
+            }
         }
 
         /// <summary>
@@ -309,7 +306,10 @@ namespace Rssdp
         /// <seealso cref="DeviceRemoved"/>
         public void RemoveDevice(SsdpEmbeddedDevice device)
         {
-            if (device == null) throw new ArgumentNullException(nameof(device));
+            if (device == null)
+            {
+                throw new ArgumentNullException(nameof(device));
+            }
 
             bool wasRemoved = false;
             lock (_Devices)
@@ -322,7 +322,9 @@ namespace Rssdp
             }
 
             if (wasRemoved)
+            {
                 OnDeviceRemoved(device);
+            }
         }
 
         /// <summary>
@@ -335,7 +337,9 @@ namespace Rssdp
         {
             var handlers = this.DeviceAdded;
             if (handlers != null)
+            {
                 handlers(this, new DeviceEventArgs(device));
+            }
         }
 
         /// <summary>
@@ -348,10 +352,9 @@ namespace Rssdp
         {
             var handlers = this.DeviceRemoved;
             if (handlers != null)
+            {
                 handlers(this, new DeviceEventArgs(device));
+            }
         }
-
-        #endregion
-
     }
 }

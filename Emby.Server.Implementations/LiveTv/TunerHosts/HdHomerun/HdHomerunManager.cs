@@ -1,19 +1,22 @@
+#pragma warning disable CS1591
+
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.LiveTv;
-using MediaBrowser.Model.Net;
-using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
 {
     public interface IHdHomerunChannelCommands
     {
-        IEnumerable<Tuple<string, string>> GetCommands();
+        IEnumerable<(string, string)> GetCommands();
     }
 
     public class LegacyHdHomerunChannelCommands : IHdHomerunChannelCommands
@@ -32,16 +35,17 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             }
         }
 
-        public IEnumerable<Tuple<string, string>> GetCommands()
+        public IEnumerable<(string, string)> GetCommands()
         {
-            var commands = new List<Tuple<string, string>>();
-
             if (!string.IsNullOrEmpty(_channel))
-                commands.Add(Tuple.Create("channel", _channel));
+            {
+                yield return ("channel", _channel);
+            }
 
             if (!string.IsNullOrEmpty(_program))
-                commands.Add(Tuple.Create("program", _program));
-            return commands;
+            {
+                yield return ("program", _program);
+            }
         }
     }
 
@@ -56,95 +60,90 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             _profile = profile;
         }
 
-        public IEnumerable<Tuple<string, string>> GetCommands()
+        public IEnumerable<(string, string)> GetCommands()
         {
-            var commands = new List<Tuple<string, string>>();
-
             if (!string.IsNullOrEmpty(_channel))
             {
-                if (!string.IsNullOrEmpty(_profile) && !string.Equals(_profile, "native", StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrEmpty(_profile)
+                    && !string.Equals(_profile, "native", StringComparison.OrdinalIgnoreCase))
                 {
-                    commands.Add(Tuple.Create("vchannel", string.Format("{0} transcode={1}", _channel, _profile)));
+                    yield return ("vchannel", $"{_channel} transcode={_profile}");
                 }
                 else
                 {
-                    commands.Add(Tuple.Create("vchannel", _channel));
+                    yield return ("vchannel", _channel);
                 }
             }
-
-            return commands;
         }
     }
 
-    public class HdHomerunManager : IDisposable
+    public sealed class HdHomerunManager : IDisposable
     {
-        public static int HdHomeRunPort = 65001;
+        public const int HdHomeRunPort = 65001;
+
         // Message constants
-        private static byte GetSetName = 3;
-        private static byte GetSetValue = 4;
-        private static byte GetSetLockkey = 21;
-        private static ushort GetSetRequest = 4;
-        private static ushort GetSetReply = 5;
+        private const byte GetSetName = 3;
+        private const byte GetSetValue = 4;
+        private const byte GetSetLockkey = 21;
+        private const ushort GetSetRequest = 4;
+        private const ushort GetSetReply = 5;
 
         private uint? _lockkey = null;
         private int _activeTuner = -1;
-        private readonly ISocketFactory _socketFactory;
-        private IpAddressInfo _remoteIp;
+        private IPEndPoint _remoteEndPoint;
 
-        private ILogger _logger;
-        private ISocket _currentTcpSocket;
-
-        public HdHomerunManager(ISocketFactory socketFactory, ILogger logger)
-        {
-            _socketFactory = socketFactory;
-            _logger = logger;
-        }
+        private TcpClient _tcpClient;
 
         public void Dispose()
         {
-            using (var socket = _currentTcpSocket)
+            using (var socket = _tcpClient)
             {
                 if (socket != null)
                 {
-                    _currentTcpSocket = null;
+                    _tcpClient = null;
 
-                    var task = StopStreaming(socket);
-                    Task.WaitAll(task);
+                    StopStreaming(socket).GetAwaiter().GetResult();
                 }
             }
+
+            GC.SuppressFinalize(this);
         }
 
-        public async Task<bool> CheckTunerAvailability(IpAddressInfo remoteIp, int tuner, CancellationToken cancellationToken)
+        public async Task<bool> CheckTunerAvailability(IPAddress remoteIp, int tuner, CancellationToken cancellationToken)
         {
-            using (var socket = _socketFactory.CreateTcpSocket(remoteIp, HdHomeRunPort))
+            using var client = new TcpClient();
+            client.Connect(remoteIp, HdHomeRunPort);
+
+            using var stream = client.GetStream();
+            return await CheckTunerAvailability(stream, tuner, cancellationToken).ConfigureAwait(false);
+        }
+
+        private static async Task<bool> CheckTunerAvailability(NetworkStream stream, int tuner, CancellationToken cancellationToken)
+        {
+            var lockkeyMsg = CreateGetMessage(tuner, "lockkey");
+            await stream.WriteAsync(lockkeyMsg, 0, lockkeyMsg.Length, cancellationToken).ConfigureAwait(false);
+
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
+            try
             {
-                return await CheckTunerAvailability(socket, remoteIp, tuner, cancellationToken).ConfigureAwait(false);
+                int receivedBytes = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+
+                ParseReturnMessage(buffer, receivedBytes, out string returnVal);
+
+                return string.Equals(returnVal, "none", StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 
-        private static async Task<bool> CheckTunerAvailability(ISocket socket, IpAddressInfo remoteIp, int tuner, CancellationToken cancellationToken)
+        public async Task StartStreaming(IPAddress remoteIp, IPAddress localIp, int localPort, IHdHomerunChannelCommands commands, int numTuners, CancellationToken cancellationToken)
         {
-            var ipEndPoint = new IpEndPointInfo(remoteIp, HdHomeRunPort);
+            _remoteEndPoint = new IPEndPoint(remoteIp, HdHomeRunPort);
 
-            var lockkeyMsg = CreateGetMessage(tuner, "lockkey");
-            await socket.SendToAsync(lockkeyMsg, 0, lockkeyMsg.Length, ipEndPoint, cancellationToken);
-
-            var receiveBuffer = new byte[8192];
-            var response = await socket.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, cancellationToken).ConfigureAwait(false);
-
-            ParseReturnMessage(response.Buffer, response.ReceivedBytes, out string returnVal);
-
-            return string.Equals(returnVal, "none", StringComparison.OrdinalIgnoreCase);
-        }
-
-        public async Task StartStreaming(IpAddressInfo remoteIp, IPAddress localIp, int localPort, IHdHomerunChannelCommands commands, int numTuners, CancellationToken cancellationToken)
-        {
-            _remoteIp = remoteIp;
-
-            var tcpClient = _socketFactory.CreateTcpSocket(_remoteIp, HdHomeRunPort);
-            _currentTcpSocket = tcpClient;
-
-            var receiveBuffer = new byte[8192];
+            _tcpClient = new TcpClient();
+            _tcpClient.Connect(_remoteEndPoint);
 
             if (!_lockkey.HasValue)
             {
@@ -153,51 +152,63 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             }
 
             var lockKeyValue = _lockkey.Value;
+            var stream = _tcpClient.GetStream();
 
-            var ipEndPoint = new IpEndPointInfo(_remoteIp, HdHomeRunPort);
-
-            for (int i = 0; i < numTuners; ++i)
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
+            try
             {
-                if (!await CheckTunerAvailability(tcpClient, _remoteIp, i, cancellationToken).ConfigureAwait(false))
-                    continue;
-
-                _activeTuner = i;
-                var lockKeyString = string.Format("{0:d}", lockKeyValue);
-                var lockkeyMsg = CreateSetMessage(i, "lockkey", lockKeyString, null);
-                await tcpClient.SendToAsync(lockkeyMsg, 0, lockkeyMsg.Length, ipEndPoint, cancellationToken).ConfigureAwait(false);
-                var response = await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, cancellationToken).ConfigureAwait(false);
-                // parse response to make sure it worked
-                if (!ParseReturnMessage(response.Buffer, response.ReceivedBytes, out var returnVal))
-                    continue;
-
-                var commandList = commands.GetCommands();
-                foreach (Tuple<string, string> command in commandList)
+                for (int i = 0; i < numTuners; ++i)
                 {
-                    var channelMsg = CreateSetMessage(i, command.Item1, command.Item2, lockKeyValue);
-                    await tcpClient.SendToAsync(channelMsg, 0, channelMsg.Length, ipEndPoint, cancellationToken).ConfigureAwait(false);
-                    response = await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, cancellationToken).ConfigureAwait(false);
-                    // parse response to make sure it worked
-                    if (!ParseReturnMessage(response.Buffer, response.ReceivedBytes, out returnVal))
+                    if (!await CheckTunerAvailability(stream, i, cancellationToken).ConfigureAwait(false))
                     {
-                        await ReleaseLockkey(tcpClient, lockKeyValue).ConfigureAwait(false);
                         continue;
                     }
 
+                    _activeTuner = i;
+                    var lockKeyString = string.Format(CultureInfo.InvariantCulture, "{0:d}", lockKeyValue);
+                    var lockkeyMsg = CreateSetMessage(i, "lockkey", lockKeyString, null);
+                    await stream.WriteAsync(lockkeyMsg, 0, lockkeyMsg.Length, cancellationToken).ConfigureAwait(false);
+                    int receivedBytes = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+
+                    // parse response to make sure it worked
+                    if (!ParseReturnMessage(buffer, receivedBytes, out _))
+                    {
+                        continue;
+                    }
+
+                    foreach (var command in commands.GetCommands())
+                    {
+                        var channelMsg = CreateSetMessage(i, command.Item1, command.Item2, lockKeyValue);
+                        await stream.WriteAsync(channelMsg, 0, channelMsg.Length, cancellationToken).ConfigureAwait(false);
+                        receivedBytes = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+
+                        // parse response to make sure it worked
+                        if (!ParseReturnMessage(buffer, receivedBytes, out _))
+                        {
+                            await ReleaseLockkey(_tcpClient, lockKeyValue).ConfigureAwait(false);
+                            continue;
+                        }
+                    }
+
+                    var targetValue = string.Format(CultureInfo.InvariantCulture, "rtp://{0}:{1}", localIp, localPort);
+                    var targetMsg = CreateSetMessage(i, "target", targetValue, lockKeyValue);
+
+                    await stream.WriteAsync(targetMsg, 0, targetMsg.Length, cancellationToken).ConfigureAwait(false);
+                    receivedBytes = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+
+                    // parse response to make sure it worked
+                    if (!ParseReturnMessage(buffer, receivedBytes, out _))
+                    {
+                        await ReleaseLockkey(_tcpClient, lockKeyValue).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    return;
                 }
-
-                var targetValue = string.Format("rtp://{0}:{1}", localIp, localPort);
-                var targetMsg = CreateSetMessage(i, "target", targetValue, lockKeyValue);
-
-                await tcpClient.SendToAsync(targetMsg, 0, targetMsg.Length, ipEndPoint, cancellationToken).ConfigureAwait(false);
-                response = await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, cancellationToken).ConfigureAwait(false);
-                // parse response to make sure it worked
-                if (!ParseReturnMessage(response.Buffer, response.ReceivedBytes, out returnVal))
-                {
-                    await ReleaseLockkey(tcpClient, lockKeyValue).ConfigureAwait(false);
-                    continue;
-                }
-
-                return;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
 
             _activeTuner = -1;
@@ -207,58 +218,74 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
         public async Task ChangeChannel(IHdHomerunChannelCommands commands, CancellationToken cancellationToken)
         {
             if (!_lockkey.HasValue)
-                return;
-
-            using (var tcpClient = _socketFactory.CreateTcpSocket(_remoteIp, HdHomeRunPort))
             {
-                var commandList = commands.GetCommands();
-                var receiveBuffer = new byte[8192];
+                return;
+            }
 
-                foreach (Tuple<string, string> command in commandList)
+            using var tcpClient = new TcpClient();
+            tcpClient.Connect(_remoteEndPoint);
+
+            using var stream = tcpClient.GetStream();
+            var commandList = commands.GetCommands();
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
+            try
+            {
+                foreach (var command in commandList)
                 {
                     var channelMsg = CreateSetMessage(_activeTuner, command.Item1, command.Item2, _lockkey);
-                    await tcpClient.SendToAsync(channelMsg, 0, channelMsg.Length, new IpEndPointInfo(_remoteIp, HdHomeRunPort), cancellationToken).ConfigureAwait(false);
-                    var response = await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, cancellationToken).ConfigureAwait(false);
+                    await stream.WriteAsync(channelMsg, 0, channelMsg.Length, cancellationToken).ConfigureAwait(false);
+                    int receivedBytes = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+
                     // parse response to make sure it worked
-                    if (!ParseReturnMessage(response.Buffer, response.ReceivedBytes, out string returnVal))
+                    if (!ParseReturnMessage(buffer, receivedBytes, out _))
                     {
                         return;
                     }
                 }
             }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
-        public Task StopStreaming(ISocket socket)
+        public Task StopStreaming(TcpClient client)
         {
             var lockKey = _lockkey;
 
             if (!lockKey.HasValue)
+            {
                 return Task.CompletedTask;
+            }
 
-            return ReleaseLockkey(socket, lockKey.Value);
+            return ReleaseLockkey(client, lockKey.Value);
         }
 
-        private async Task ReleaseLockkey(ISocket tcpClient, uint lockKeyValue)
+        private async Task ReleaseLockkey(TcpClient client, uint lockKeyValue)
         {
-            _logger.LogInformation("HdHomerunManager.ReleaseLockkey {0}", lockKeyValue);
-
-            var ipEndPoint = new IpEndPointInfo(_remoteIp, HdHomeRunPort);
+            var stream = client.GetStream();
 
             var releaseTarget = CreateSetMessage(_activeTuner, "target", "none", lockKeyValue);
-            await tcpClient.SendToAsync(releaseTarget, 0, releaseTarget.Length, ipEndPoint, CancellationToken.None).ConfigureAwait(false);
+            await stream.WriteAsync(releaseTarget, 0, releaseTarget.Length).ConfigureAwait(false);
 
-            var receiveBuffer = new byte[8192];
-
-            await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, CancellationToken.None).ConfigureAwait(false);
-            var releaseKeyMsg = CreateSetMessage(_activeTuner, "lockkey", "none", lockKeyValue);
-            _lockkey = null;
-            await tcpClient.SendToAsync(releaseKeyMsg, 0, releaseKeyMsg.Length, ipEndPoint, CancellationToken.None).ConfigureAwait(false);
-            await tcpClient.ReceiveAsync(receiveBuffer, 0, receiveBuffer.Length, CancellationToken.None).ConfigureAwait(false);
+            var buffer = ArrayPool<byte>.Shared.Rent(8192);
+            try
+            {
+                await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                var releaseKeyMsg = CreateSetMessage(_activeTuner, "lockkey", "none", lockKeyValue);
+                _lockkey = null;
+                await stream.WriteAsync(releaseKeyMsg, 0, releaseKeyMsg.Length).ConfigureAwait(false);
+                await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         private static byte[] CreateGetMessage(int tuner, string name)
         {
-            var byteName = Encoding.UTF8.GetBytes(string.Format("/tuner{0}/{1}\0", tuner, name));
+            var byteName = Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "/tuner{0}/{1}\0", tuner, name));
             int messageLength = byteName.Length + 10; // 4 bytes for header + 4 bytes for crc + 2 bytes for tag name and length
 
             var message = new byte[messageLength];
@@ -270,7 +297,10 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             // calculate crc and insert at the end of the message
             var crcBytes = BitConverter.GetBytes(HdHomerunCrc.GetCrc32(message, messageLength - 4));
             if (flipEndian)
+            {
                 Array.Reverse(crcBytes);
+            }
+
             Buffer.BlockCopy(crcBytes, 0, message, offset, 4);
 
             return message;
@@ -278,12 +308,14 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
 
         private static byte[] CreateSetMessage(int tuner, string name, string value, uint? lockkey)
         {
-            var byteName = Encoding.UTF8.GetBytes(string.Format("/tuner{0}/{1}\0", tuner, name));
-            var byteValue = Encoding.UTF8.GetBytes(string.Format("{0}\0", value));
+            var byteName = Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "/tuner{0}/{1}\0", tuner, name));
+            var byteValue = Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "{0}\0", value));
 
             int messageLength = byteName.Length + byteValue.Length + 12;
             if (lockkey.HasValue)
+            {
                 messageLength += 6;
+            }
 
             var message = new byte[messageLength];
 
@@ -291,21 +323,20 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
 
             bool flipEndian = BitConverter.IsLittleEndian;
 
-            message[offset] = GetSetValue;
-            offset++;
-            message[offset] = Convert.ToByte(byteValue.Length);
-            offset++;
+            message[offset++] = GetSetValue;
+            message[offset++] = Convert.ToByte(byteValue.Length);
             Buffer.BlockCopy(byteValue, 0, message, offset, byteValue.Length);
             offset += byteValue.Length;
             if (lockkey.HasValue)
             {
-                message[offset] = GetSetLockkey;
-                offset++;
-                message[offset] = (byte)4;
-                offset++;
+                message[offset++] = GetSetLockkey;
+                message[offset++] = 4;
                 var lockKeyBytes = BitConverter.GetBytes(lockkey.Value);
                 if (flipEndian)
+                {
                     Array.Reverse(lockKeyBytes);
+                }
+
                 Buffer.BlockCopy(lockKeyBytes, 0, message, offset, 4);
                 offset += 4;
             }
@@ -313,7 +344,10 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             // calculate crc and insert at the end of the message
             var crcBytes = BitConverter.GetBytes(HdHomerunCrc.GetCrc32(message, messageLength - 4));
             if (flipEndian)
+            {
                 Array.Reverse(crcBytes);
+            }
+
             Buffer.BlockCopy(crcBytes, 0, message, offset, 4);
 
             return message;
@@ -342,10 +376,8 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             offset += 2;
 
             // insert tag name and length
-            message[offset] = GetSetName;
-            offset++;
-            message[offset] = Convert.ToByte(byteName.Length);
-            offset++;
+            message[offset++] = GetSetName;
+            message[offset++] = Convert.ToByte(byteName.Length);
 
             // insert name string
             Buffer.BlockCopy(byteName, 0, message, offset, byteName.Length);
@@ -359,7 +391,9 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             returnVal = string.Empty;
 
             if (numBytes < 4)
+            {
                 return false;
+            }
 
             var flipEndian = BitConverter.IsLittleEndian;
             int offset = 0;
@@ -367,45 +401,49 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             Buffer.BlockCopy(buf, offset, msgTypeBytes, 0, msgTypeBytes.Length);
 
             if (flipEndian)
+            {
                 Array.Reverse(msgTypeBytes);
+            }
 
             var msgType = BitConverter.ToUInt16(msgTypeBytes, 0);
             offset += 2;
 
             if (msgType != GetSetReply)
+            {
                 return false;
+            }
 
             byte[] msgLengthBytes = new byte[2];
             Buffer.BlockCopy(buf, offset, msgLengthBytes, 0, msgLengthBytes.Length);
             if (flipEndian)
+            {
                 Array.Reverse(msgLengthBytes);
+            }
 
             var msgLength = BitConverter.ToUInt16(msgLengthBytes, 0);
             offset += 2;
 
             if (numBytes < msgLength + 8)
+            {
                 return false;
+            }
 
-            var nameTag = buf[offset];
-            offset++;
+            offset++; // Name Tag
 
-            var nameLength = buf[offset];
-            offset++;
+            var nameLength = buf[offset++];
 
             // skip the name field to get to value for return
             offset += nameLength;
 
-            var valueTag = buf[offset];
-            offset++;
+            offset++; // Value Tag
 
-            var valueLength = buf[offset];
-            offset++;
+            var valueLength = buf[offset++];
 
             returnVal = Encoding.UTF8.GetString(buf, offset, valueLength - 1); // remove null terminator
             return true;
         }
 
-        private class HdHomerunCrc
+        private static class HdHomerunCrc
         {
             private static uint[] crc_table = {
             0x00000000, 0x77073096, 0xee0e612c, 0x990951ba,
@@ -477,15 +515,16 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts.HdHomerun
             {
                 var hash = 0xffffffff;
                 for (var i = 0; i < numBytes; i++)
+                {
                     hash = (hash >> 8) ^ crc_table[(hash ^ bytes[i]) & 0xff];
+                }
 
                 var tmp = ~hash & 0xffffffff;
                 var b0 = tmp & 0xff;
                 var b1 = (tmp >> 8) & 0xff;
                 var b2 = (tmp >> 16) & 0xff;
                 var b3 = (tmp >> 24) & 0xff;
-                hash = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
-                return hash;
+                return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
             }
         }
     }

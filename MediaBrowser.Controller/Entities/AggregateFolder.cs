@@ -1,14 +1,16 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
@@ -23,7 +25,7 @@ namespace MediaBrowser.Controller.Entities
             PhysicalLocationsList = Array.Empty<string>();
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool IsPhysicalRoot => true;
 
         public override bool CanDelete()
@@ -31,11 +33,11 @@ namespace MediaBrowser.Controller.Entities
             return false;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPlayedStatus => false;
 
         /// <summary>
-        /// The _virtual children
+        /// The _virtual children.
         /// </summary>
         private readonly ConcurrentBag<BaseItem> _virtualChildren = new ConcurrentBag<BaseItem>();
 
@@ -45,7 +47,7 @@ namespace MediaBrowser.Controller.Entities
         /// <value>The virtual children.</value>
         public ConcurrentBag<BaseItem> VirtualChildren => _virtualChildren;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string[] PhysicalLocations => PhysicalLocationsList;
 
         public string[] PhysicalLocationsList { get; set; }
@@ -57,6 +59,7 @@ namespace MediaBrowser.Controller.Entities
 
         private Guid[] _childrenIds = null;
         private readonly object _childIdsLock = new object();
+
         protected override List<BaseItem> LoadChildren()
         {
             lock (_childIdsLock)
@@ -89,7 +92,7 @@ namespace MediaBrowser.Controller.Entities
             {
                 var locations = PhysicalLocations;
 
-                var newLocations = CreateResolveArgs(new DirectoryService(Logger, FileSystem), false).PhysicalLocations;
+                var newLocations = CreateResolveArgs(new DirectoryService(FileSystem), false).PhysicalLocations;
 
                 if (!locations.SequenceEqual(newLocations))
                 {
@@ -195,6 +198,7 @@ namespace MediaBrowser.Controller.Entities
                     return child;
                 }
             }
+
             return null;
         }
     }

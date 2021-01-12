@@ -1,45 +1,48 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Library;
-using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
+using MediaBrowser.Model.Globalization;
 
 namespace Emby.Server.Implementations.ScheduledTasks
 {
     /// <summary>
-    /// Class RefreshMediaLibraryTask
+    /// Class RefreshMediaLibraryTask.
     /// </summary>
     public class RefreshMediaLibraryTask : IScheduledTask
     {
         /// <summary>
-        /// The _library manager
+        /// The _library manager.
         /// </summary>
         private readonly ILibraryManager _libraryManager;
-        private readonly IServerConfigurationManager _config;
+        private readonly ILocalizationManager _localization;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RefreshMediaLibraryTask" /> class.
         /// </summary>
         /// <param name="libraryManager">The library manager.</param>
-        public RefreshMediaLibraryTask(ILibraryManager libraryManager, IServerConfigurationManager config)
+        /// <param name="localization">The localization manager.</param>
+        public RefreshMediaLibraryTask(ILibraryManager libraryManager, ILocalizationManager localization)
         {
             _libraryManager = libraryManager;
-            _config = config;
+            _localization = localization;
         }
 
         /// <summary>
-        /// Creates the triggers that define when the task will run
+        /// Creates the triggers that define when the task will run.
         /// </summary>
         /// <returns>IEnumerable{BaseTaskTrigger}.</returns>
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
-            return new[] {
-
-                // Every so often
-                new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerInterval, IntervalTicks = TimeSpan.FromHours(12).Ticks}
+            yield return new TaskTriggerInfo
+            {
+                Type = TaskTriggerInfo.TriggerInterval,
+                IntervalTicks = TimeSpan.FromHours(12).Ticks
             };
         }
 
@@ -58,18 +61,25 @@ namespace Emby.Server.Implementations.ScheduledTasks
             return ((LibraryManager)_libraryManager).ValidateMediaLibraryInternal(progress, cancellationToken);
         }
 
-        public string Name => "Scan media library";
+        /// <inheritdoc />
+        public string Name => _localization.GetLocalizedString("TaskRefreshLibrary");
 
-        public string Description => "Scans your media library and refreshes metatata based on configuration.";
+        /// <inheritdoc />
+        public string Description => _localization.GetLocalizedString("TaskRefreshLibraryDescription");
 
-        public string Category => "Library";
+        /// <inheritdoc />
+        public string Category => _localization.GetLocalizedString("TasksLibraryCategory");
 
+        /// <inheritdoc />
         public string Key => "RefreshLibrary";
 
+        /// <inheritdoc />
         public bool IsHidden => false;
 
+        /// <inheritdoc />
         public bool IsEnabled => true;
 
+        /// <inheritdoc />
         public bool IsLogged => true;
     }
 }

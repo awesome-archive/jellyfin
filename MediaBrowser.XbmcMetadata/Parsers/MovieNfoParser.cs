@@ -7,21 +7,30 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Parsers
 {
+    /// <summary>
+    /// Nfo parser for movies.
+    /// </summary>
     public class MovieNfoParser : BaseNfoParser<Video>
     {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="MovieNfoParser"/> class.
+        /// </summary>
+        /// <param name="logger">The logger.</param>
+        /// <param name="config">the configuration manager.</param>
+        /// <param name="providerManager">The provider manager.</param>
+        public MovieNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager)
+            : base(logger, config, providerManager)
+        {
+        }
+
+        /// <inheritdoc />
         protected override bool SupportsUrlAfterClosingXmlTag => true;
 
-        /// <summary>
-        /// Fetches the data from XML node.
-        /// </summary>
-        /// <param name="reader">The reader.</param>
-        /// <param name="itemResult">The item result.</param>
+        /// <inheritdoc />
         protected override void FetchDataFromXmlNode(XmlReader reader, MetadataResult<Video> itemResult)
         {
             var item = itemResult.Item;
@@ -30,23 +39,27 @@ namespace MediaBrowser.XbmcMetadata.Parsers
             {
                 case "id":
                     {
-                        string imdbId = reader.GetAttribute("IMDB");
-                        string tmdbId = reader.GetAttribute("TMDB");
+                        string? imdbId = reader.GetAttribute("IMDB");
+                        string? tmdbId = reader.GetAttribute("TMDB");
 
                         if (string.IsNullOrWhiteSpace(imdbId))
                         {
                             imdbId = reader.ReadElementContentAsString();
                         }
+
                         if (!string.IsNullOrWhiteSpace(imdbId))
                         {
-                            item.SetProviderId(MetadataProviders.Imdb, imdbId);
+                            item.SetProviderId(MetadataProvider.Imdb, imdbId);
                         }
+
                         if (!string.IsNullOrWhiteSpace(tmdbId))
                         {
-                            item.SetProviderId(MetadataProviders.Tmdb, tmdbId);
+                            item.SetProviderId(MetadataProvider.Tmdb, tmdbId);
                         }
+
                         break;
                     }
+
                 case "set":
                     {
                         var movie = item as Movie;
@@ -54,7 +67,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                         var tmdbcolid = reader.GetAttribute("tmdbcolid");
                         if (!string.IsNullOrWhiteSpace(tmdbcolid) && movie != null)
                         {
-                            movie.SetProviderId(MetadataProviders.TmdbCollection, tmdbcolid);
+                            movie.SetProviderId(MetadataProvider.TmdbCollection, tmdbcolid);
                         }
 
                         var val = reader.ReadInnerXml();
@@ -62,7 +75,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                         if (!string.IsNullOrWhiteSpace(val) && movie != null)
                         {
                             // TODO Handle this better later
-                            if (val.IndexOf('<') == -1)
+                            if (!val.Contains('<', StringComparison.Ordinal))
                             {
                                 movie.CollectionName = val;
                             }
@@ -85,9 +98,8 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                 case "artist":
                     {
                         var val = reader.ReadElementContentAsString();
-                        var movie = item as MusicVideo;
 
-                        if (!string.IsNullOrWhiteSpace(val) && movie != null)
+                        if (!string.IsNullOrWhiteSpace(val) && item is MusicVideo movie)
                         {
                             var list = movie.Artists.ToList();
                             list.Add(val);
@@ -100,9 +112,8 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                 case "album":
                     {
                         var val = reader.ReadElementContentAsString();
-                        var movie = item as MusicVideo;
 
-                        if (!string.IsNullOrWhiteSpace(val) && movie != null)
+                        if (!string.IsNullOrWhiteSpace(val) && item is MusicVideo movie)
                         {
                             movie.Album = val;
                         }
@@ -118,57 +129,40 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
         private void ParseSetXml(string xml, Movie movie)
         {
-            //xml = xml.Substring(xml.IndexOf('<'));
-            //xml = xml.Substring(0, xml.LastIndexOf('>'));
-
-            using (var stringReader = new StringReader("<set>" + xml + "</set>"))
+            // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
+            try
             {
-                // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
-                try
+                using (var stringReader = new StringReader("<set>" + xml + "</set>"))
+                using (var reader = XmlReader.Create(stringReader, GetXmlReaderSettings()))
                 {
-                    var settings = XmlReaderSettingsFactory.Create(false);
+                    reader.MoveToContent();
+                    reader.Read();
 
-                    settings.CheckCharacters = false;
-                    settings.IgnoreProcessingInstructions = true;
-                    settings.IgnoreComments = true;
-
-                    // Use XmlReader for best performance
-                    using (var reader = XmlReader.Create(stringReader, settings))
+                    // Loop through each element
+                    while (!reader.EOF && reader.ReadState == ReadState.Interactive)
                     {
-                        reader.MoveToContent();
-                        reader.Read();
-
-                        // Loop through each element
-                        while (!reader.EOF && reader.ReadState == ReadState.Interactive)
+                        if (reader.NodeType == XmlNodeType.Element)
                         {
-                            if (reader.NodeType == XmlNodeType.Element)
+                            switch (reader.Name)
                             {
-                                switch (reader.Name)
-                                {
-                                    case "name":
-                                        movie.CollectionName = reader.ReadElementContentAsString();
-                                        break;
-                                    default:
-                                        reader.Skip();
-                                        break;
-                                }
+                                case "name":
+                                    movie.CollectionName = reader.ReadElementContentAsString();
+                                    break;
+                                default:
+                                    reader.Skip();
+                                    break;
                             }
-                            else
-                            {
-                                reader.Read();
-                            }
+                        }
+                        else
+                        {
+                            reader.Read();
                         }
                     }
                 }
-                catch (XmlException)
-                {
-
-                }
             }
-        }
-
-        public MovieNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager, IFileSystem fileSystem, IXmlReaderSettingsFactory xmlReaderSettingsFactory) : base(logger, config, providerManager, fileSystem, xmlReaderSettingsFactory)
-        {
+            catch (XmlException)
+            {
+            }
         }
     }
 }

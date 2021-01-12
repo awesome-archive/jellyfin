@@ -1,14 +1,17 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.LiveTv;
 using MediaBrowser.Model.Providers;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.LiveTv
 {
@@ -25,13 +28,13 @@ namespace MediaBrowser.Controller.LiveTv
 
             if (!IsSeries)
             {
-                var key = this.GetProviderId(MetadataProviders.Imdb);
+                var key = this.GetProviderId(MetadataProvider.Imdb);
                 if (!string.IsNullOrEmpty(key))
                 {
                     list.Insert(0, key);
                 }
 
-                key = this.GetProviderId(MetadataProviders.Tmdb);
+                key = this.GetProviderId(MetadataProvider.Tmdb);
                 if (!string.IsNullOrEmpty(key))
                 {
                     list.Insert(0, key);
@@ -62,91 +65,91 @@ namespace MediaBrowser.Controller.LiveTv
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override SourceType SourceType => SourceType.LiveTV;
 
         /// <summary>
         /// The start date of the program, in UTC.
         /// </summary>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public DateTime StartDate { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is repeat.
         /// </summary>
         /// <value><c>true</c> if this instance is repeat; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsRepeat { get; set; }
 
         /// <summary>
         /// Gets or sets the episode title.
         /// </summary>
         /// <value>The episode title.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string EpisodeTitle { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string ShowId { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is movie.
         /// </summary>
         /// <value><c>true</c> if this instance is movie; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsMovie { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is sports.
         /// </summary>
         /// <value><c>true</c> if this instance is sports; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsSports => Tags.Contains("Sports", StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is series.
         /// </summary>
         /// <value><c>true</c> if this instance is series; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsSeries { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is live.
         /// </summary>
         /// <value><c>true</c> if this instance is live; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsLive => Tags.Contains("Live", StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is news.
         /// </summary>
         /// <value><c>true</c> if this instance is news; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsNews => Tags.Contains("News", StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is kids.
         /// </summary>
         /// <value><c>true</c> if this instance is kids; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsKids => Tags.Contains("Kids", StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is premiere.
         /// </summary>
         /// <value><c>true</c> if this instance is premiere; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsPremiere => Tags.Contains("Premiere", StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Returns the folder containing the item.
-        /// If the item is a folder, it returns the folder itself
+        /// If the item is a folder, it returns the folder itself.
         /// </summary>
         /// <value>The containing folder path.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string ContainingFolderPath => Path;
 
-        //[IgnoreDataMember]
-        //public override string MediaType
+        //[JsonIgnore]
+        // public override string MediaType
         //{
         //    get
         //    {
@@ -154,7 +157,7 @@ namespace MediaBrowser.Controller.LiveTv
         //    }
         //}
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsAiring
         {
             get
@@ -165,7 +168,7 @@ namespace MediaBrowser.Controller.LiveTv
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool HasAired
         {
             get
@@ -188,7 +191,7 @@ namespace MediaBrowser.Controller.LiveTv
 
         protected override string GetInternalMetadataPath(string basePath)
         {
-            return System.IO.Path.Combine(basePath, "livetv", Id.ToString("N"));
+            return System.IO.Path.Combine(basePath, "livetv", Id.ToString("N", CultureInfo.InvariantCulture));
         }
 
         public override bool CanDelete()
@@ -196,7 +199,7 @@ namespace MediaBrowser.Controller.LiveTv
             return false;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPeople
         {
             get
@@ -211,7 +214,7 @@ namespace MediaBrowser.Controller.LiveTv
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsAncestors => false;
 
         private LiveTvOptions GetConfiguration()
@@ -252,7 +255,7 @@ namespace MediaBrowser.Controller.LiveTv
         {
             var list = base.GetRelatedUrls();
 
-            var imdbId = this.GetProviderId(MetadataProviders.Imdb);
+            var imdbId = this.GetProviderId(MetadataProvider.Imdb);
             if (!string.IsNullOrEmpty(imdbId))
             {
                 if (IsMovie)
@@ -260,7 +263,7 @@ namespace MediaBrowser.Controller.LiveTv
                     list.Add(new ExternalUrl
                     {
                         Name = "Trakt",
-                        Url = string.Format("https://trakt.tv/movies/{0}", imdbId)
+                        Url = string.Format(CultureInfo.InvariantCulture, "https://trakt.tv/movies/{0}", imdbId)
                     });
                 }
             }

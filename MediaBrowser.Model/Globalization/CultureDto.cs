@@ -1,9 +1,12 @@
-using global::System;
+#nullable disable
+#pragma warning disable CS1591
+
+using System;
 
 namespace MediaBrowser.Model.Globalization
 {
     /// <summary>
-    /// Class CultureDto
+    /// Class CultureDto.
     /// </summary>
     public class CultureDto
     {
@@ -38,6 +41,7 @@ namespace MediaBrowser.Model.Globalization
                 {
                     return vals[0];
                 }
+
                 return null;
             }
         }

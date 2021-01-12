@@ -1,3 +1,5 @@
+#pragma warning disable CS1591
+
 using System;
 using System.IO;
 using System.Linq;
@@ -6,23 +8,20 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
 
 namespace Emby.Server.Implementations.Library.Resolvers
 {
     /// <summary>
-    /// Resolves a Path into a Video or Video subclass
+    /// Resolves a Path into a Video or Video subclass.
     /// </summary>
     /// <typeparam name="T"></typeparam>
     public abstract class BaseVideoResolver<T> : MediaBrowser.Controller.Resolvers.ItemResolver<T>
         where T : Video, new()
     {
         protected readonly ILibraryManager LibraryManager;
-        protected readonly IFileSystem FileSystem;
 
-        protected BaseVideoResolver(ILibraryManager libraryManager, IFileSystem fileSystem)
+        protected BaseVideoResolver(ILibraryManager libraryManager)
         {
-            FileSystem = fileSystem;
             LibraryManager = libraryManager;
         }
 
@@ -80,6 +79,7 @@ namespace Emby.Server.Implementations.Library.Resolvers
                             };
                             break;
                         }
+
                         if (IsBluRayDirectory(child.FullName, filename, args.DirectoryService))
                         {
                             videoInfo = parser.ResolveDirectory(args.Path);
@@ -137,7 +137,7 @@ namespace Emby.Server.Implementations.Library.Resolvers
                     return null;
                 }
 
-                if (LibraryManager.IsVideoFile(args.Path, args.GetLibraryOptions()) || videoInfo.IsStub)
+                if (LibraryManager.IsVideoFile(args.Path) || videoInfo.IsStub)
                 {
                     var path = args.Path;
 
@@ -292,7 +292,7 @@ namespace Emby.Server.Implementations.Library.Resolvers
             }
 
             return true;
-            //var blurayExtensions = new[]
+            // var blurayExtensions = new[]
             //{
             //    ".mts",
             //    ".m2ts",
@@ -300,7 +300,7 @@ namespace Emby.Server.Implementations.Library.Resolvers
             //    ".mpls"
             //};
 
-            //return directoryService.GetFiles(fullPath).Any(i => blurayExtensions.Contains(i.Extension ?? string.Empty, StringComparer.OrdinalIgnoreCase));
+            // return directoryService.GetFiles(fullPath).Any(i => blurayExtensions.Contains(i.Extension ?? string.Empty, StringComparer.OrdinalIgnoreCase));
         }
     }
 }

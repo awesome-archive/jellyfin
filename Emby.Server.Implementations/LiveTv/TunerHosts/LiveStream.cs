@@ -1,10 +1,13 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Controller;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.IO;
@@ -15,51 +18,64 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts
 {
     public class LiveStream : ILiveStream
     {
-        public MediaSourceInfo OriginalMediaSource { get; set; }
-        public MediaSourceInfo MediaSource { get; set; }
-
-        public int ConsumerCount { get; set; }
-
-        public string OriginalStreamId { get; set; }
-        public bool EnableStreamSharing { get; set; }
-        public string UniqueId { get; private set; }
+        private readonly IConfigurationManager _configurationManager;
 
         protected readonly IFileSystem FileSystem;
-        protected readonly IServerApplicationPaths AppPaths;
+
+        protected readonly IStreamHelper StreamHelper;
 
         protected string TempFilePath;
         protected readonly ILogger Logger;
         protected readonly CancellationTokenSource LiveStreamCancellationTokenSource = new CancellationTokenSource();
 
-        public string TunerHostId { get; private set; }
-
-        public DateTime DateOpened { get; protected set; }
-
-        public Func<Task> OnClose { get; set; }
-
-        public LiveStream(MediaSourceInfo mediaSource, TunerHostInfo tuner, IFileSystem fileSystem, ILogger logger, IServerApplicationPaths appPaths)
+        public LiveStream(
+            MediaSourceInfo mediaSource,
+            TunerHostInfo tuner,
+            IFileSystem fileSystem,
+            ILogger logger,
+            IConfigurationManager configurationManager,
+            IStreamHelper streamHelper)
         {
             OriginalMediaSource = mediaSource;
             FileSystem = fileSystem;
             MediaSource = mediaSource;
             Logger = logger;
             EnableStreamSharing = true;
-            UniqueId = Guid.NewGuid().ToString("N");
+            UniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
 
             if (tuner != null)
             {
                 TunerHostId = tuner.Id;
             }
 
-            AppPaths = appPaths;
+            _configurationManager = configurationManager;
+            StreamHelper = streamHelper;
 
             ConsumerCount = 1;
             SetTempFilePath("ts");
         }
 
+        protected virtual int EmptyReadLimit => 1000;
+
+        public MediaSourceInfo OriginalMediaSource { get; set; }
+
+        public MediaSourceInfo MediaSource { get; set; }
+
+        public int ConsumerCount { get; set; }
+
+        public string OriginalStreamId { get; set; }
+
+        public bool EnableStreamSharing { get; set; }
+
+        public string UniqueId { get; }
+
+        public string TunerHostId { get; }
+
+        public DateTime DateOpened { get; protected set; }
+
         protected void SetTempFilePath(string extension)
         {
-            TempFilePath = Path.Combine(AppPaths.GetTranscodingTempPath(), UniqueId + "." + extension);
+            TempFilePath = Path.Combine(_configurationManager.GetTranscodePath(), UniqueId + "." + extension);
         }
 
         public virtual Task Open(CancellationToken openCancellationToken)
@@ -72,67 +88,46 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts
         {
             EnableStreamSharing = false;
 
-            Logger.LogInformation("Closing " + GetType().Name);
+            Logger.LogInformation("Closing {Type}", GetType().Name);
 
             LiveStreamCancellationTokenSource.Cancel();
-
-            if (OnClose != null)
-            {
-                return CloseWithExternalFn();
-            }
 
             return Task.CompletedTask;
         }
 
-        private async Task CloseWithExternalFn()
-        {
-            try
-            {
-                await OnClose().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(ex, "Error closing live stream");
-            }
-        }
-
-        protected Stream GetInputStream(string path, bool allowAsyncFileRead)
-        {
-            var fileOpenOptions = FileOpenOptions.SequentialScan;
-
-            if (allowAsyncFileRead)
-            {
-                fileOpenOptions |= FileOpenOptions.Asynchronous;
-            }
-
-            return FileSystem.GetFileStream(path, FileOpenMode.Open, FileAccessMode.Read, FileShareMode.ReadWrite, fileOpenOptions);
-        }
+        protected FileStream GetInputStream(string path, bool allowAsyncFileRead)
+            => new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                IODefaults.FileStreamBufferSize,
+                allowAsyncFileRead ? FileOptions.SequentialScan | FileOptions.Asynchronous : FileOptions.SequentialScan);
 
         public Task DeleteTempFiles()
         {
             return DeleteTempFiles(GetStreamFilePaths());
         }
 
-        protected async Task DeleteTempFiles(List<string> paths, int retryCount = 0)
+        protected async Task DeleteTempFiles(IEnumerable<string> paths, int retryCount = 0)
         {
             if (retryCount == 0)
             {
-                Logger.LogInformation("Deleting temp files {0}", string.Join(", ", paths.ToArray()));
+                Logger.LogInformation("Deleting temp files {0}", paths);
             }
 
             var failedFiles = new List<string>();
 
             foreach (var path in paths)
             {
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
                 try
                 {
                     FileSystem.DeleteFile(path);
-                }
-                catch (DirectoryNotFoundException)
-                {
-                }
-                catch (FileNotFoundException)
-                {
                 }
                 catch (Exception ex)
                 {
@@ -157,14 +152,14 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts
         {
             cancellationToken = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, LiveStreamCancellationTokenSource.Token).Token;
 
-            var allowAsync = false;
-            // use non-async filestream along with read due to https://github.com/dotnet/corefx/issues/6039
+            // use non-async filestream on windows along with read due to https://github.com/dotnet/corefx/issues/6039
+            var allowAsync = Environment.OSVersion.Platform != PlatformID.Win32NT;
 
             bool seekFile = (DateTime.UtcNow - DateOpened).TotalSeconds > 10;
 
             var nextFileInfo = GetNextFile(null);
-            var nextFile = nextFileInfo.Item1;
-            var isLastFile = nextFileInfo.Item2;
+            var nextFile = nextFileInfo.file;
+            var isLastFile = nextFileInfo.isLastFile;
 
             while (!string.IsNullOrEmpty(nextFile))
             {
@@ -174,62 +169,63 @@ namespace Emby.Server.Implementations.LiveTv.TunerHosts
 
                 seekFile = false;
                 nextFileInfo = GetNextFile(nextFile);
-                nextFile = nextFileInfo.Item1;
-                isLastFile = nextFileInfo.Item2;
+                nextFile = nextFileInfo.file;
+                isLastFile = nextFileInfo.isLastFile;
             }
 
             Logger.LogInformation("Live Stream ended.");
         }
 
-        private Tuple<string, bool> GetNextFile(string currentFile)
+        private (string file, bool isLastFile) GetNextFile(string currentFile)
         {
             var files = GetStreamFilePaths();
 
-            //logger.LogInformation("Live stream files: {0}", string.Join(", ", files.ToArray()));
-
             if (string.IsNullOrEmpty(currentFile))
             {
-                return new Tuple<string, bool>(files.Last(), true);
+                return (files[^1], true);
             }
 
             var nextIndex = files.FindIndex(i => string.Equals(i, currentFile, StringComparison.OrdinalIgnoreCase)) + 1;
 
             var isLastFile = nextIndex == files.Count - 1;
 
-            return new Tuple<string, bool>(files.ElementAtOrDefault(nextIndex), isLastFile);
+            return (files.ElementAtOrDefault(nextIndex), isLastFile);
         }
 
         private async Task CopyFile(string path, bool seekFile, int emptyReadLimit, bool allowAsync, Stream stream, CancellationToken cancellationToken)
         {
-            //logger.LogInformation("Opening live stream file {0}. Empty read limit: {1}", path, emptyReadLimit);
-
-            using (var inputStream = (FileStream)GetInputStream(path, allowAsync))
+            using (var inputStream = GetInputStream(path, allowAsync))
             {
                 if (seekFile)
                 {
                     TrySeek(inputStream, -20000);
                 }
 
-                await ApplicationHost.StreamHelper.CopyToAsync(inputStream, stream, 81920, emptyReadLimit, cancellationToken).ConfigureAwait(false);
+                await StreamHelper.CopyToAsync(
+                    inputStream,
+                    stream,
+                    IODefaults.CopyToBufferSize,
+                    emptyReadLimit,
+                    cancellationToken).ConfigureAwait(false);
             }
         }
 
-        protected virtual int EmptyReadLimit => 1000;
-
         private void TrySeek(FileStream stream, long offset)
         {
-            //logger.LogInformation("TrySeek live stream");
+            if (!stream.CanSeek)
+            {
+                return;
+            }
+
             try
             {
                 stream.Seek(offset, SeekOrigin.End);
             }
             catch (IOException)
             {
-
             }
             catch (ArgumentException)
             {
-
             }
             catch (Exception ex)
             {

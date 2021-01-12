@@ -1,9 +1,12 @@
+#pragma warning disable CS1591
+
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Serialization;
+using Jellyfin.Data.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Model.Querying;
-using MediaBrowser.Model.Serialization;
 
 namespace Emby.Server.Implementations.Playlists
 {
@@ -24,13 +27,13 @@ namespace Emby.Server.Implementations.Playlists
             return base.GetEligibleChildrenForRecursiveChildren(user).OfType<Playlist>();
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool IsHidden => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string CollectionType => MediaBrowser.Model.Entities.CollectionType.Playlists;
 
         protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
@@ -42,10 +45,9 @@ namespace Emby.Server.Implementations.Playlists
             }
 
             query.Recursive = true;
-            query.IncludeItemTypes = new string[] { "Playlist" };
+            query.IncludeItemTypes = new[] { "Playlist" };
             query.Parent = null;
             return LibraryManager.GetItemsResult(query);
         }
     }
 }
-

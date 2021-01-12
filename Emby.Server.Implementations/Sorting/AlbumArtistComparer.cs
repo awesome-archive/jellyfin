@@ -8,7 +8,7 @@ using MediaBrowser.Model.Querying;
 namespace Emby.Server.Implementations.Sorting
 {
     /// <summary>
-    /// Class AlbumArtistComparer
+    /// Class AlbumArtistComparer.
     /// </summary>
     public class AlbumArtistComparer : IBaseItemComparer
     {
@@ -32,7 +32,7 @@ namespace Emby.Server.Implementations.Sorting
         {
             var audio = x as IHasAlbumArtist;
 
-            return audio != null ? audio.AlbumArtists.FirstOrDefault() : null;
+            return audio?.AlbumArtists.FirstOrDefault();
         }
 
         /// <summary>

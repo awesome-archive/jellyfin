@@ -1,7 +1,7 @@
 using System;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
@@ -11,20 +11,20 @@ using Microsoft.Extensions.Logging;
 namespace Emby.Server.Implementations.Library.Validators
 {
     /// <summary>
-    /// Class PeopleValidator
+    /// Class PeopleValidator.
     /// </summary>
     public class PeopleValidator
     {
         /// <summary>
-        /// The _library manager
+        /// The _library manager.
         /// </summary>
         private readonly ILibraryManager _libraryManager;
+
         /// <summary>
-        /// The _logger
+        /// The _logger.
         /// </summary>
         private readonly ILogger _logger;
 
-        private readonly IServerConfigurationManager _config;
         private readonly IFileSystem _fileSystem;
 
         /// <summary>
@@ -32,11 +32,11 @@ namespace Emby.Server.Implementations.Library.Validators
         /// </summary>
         /// <param name="libraryManager">The library manager.</param>
         /// <param name="logger">The logger.</param>
-        public PeopleValidator(ILibraryManager libraryManager, ILogger logger, IServerConfigurationManager config, IFileSystem fileSystem)
+        /// <param name="fileSystem">The file system.</param>
+        public PeopleValidator(ILibraryManager libraryManager, ILogger logger, IFileSystem fileSystem)
         {
             _libraryManager = libraryManager;
             _logger = logger;
-            _config = config;
             _fileSystem = fileSystem;
         }
 
@@ -64,7 +64,7 @@ namespace Emby.Server.Implementations.Library.Validators
                 {
                     var item = _libraryManager.GetPerson(person);
 
-                    var options = new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem))
+                    var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
                     {
                         ImageRefreshMode = MetadataRefreshMode.ValidationOnly,
                         MetadataRefreshMode = MetadataRefreshMode.ValidationOnly
@@ -91,19 +91,26 @@ namespace Emby.Server.Implementations.Library.Validators
 
             var deadEntities = _libraryManager.GetItemList(new InternalItemsQuery
             {
-                IncludeItemTypes = new[] { typeof(Person).Name },
+                IncludeItemTypes = new[] { nameof(Person) },
                 IsDeadPerson = true,
                 IsLocked = false
             });
 
             foreach (var item in deadEntities)
             {
-                _logger.LogInformation("Deleting dead {2} {0} {1}.", item.Id.ToString("N"), item.Name, item.GetType().Name);
+                _logger.LogInformation(
+                    "Deleting dead {2} {0} {1}.",
+                    item.Id.ToString("N", CultureInfo.InvariantCulture),
+                    item.Name,
+                    item.GetType().Name);
 
-                _libraryManager.DeleteItem(item, new DeleteOptions
-                {
-                    DeleteFileLocation = false
-                }, false);
+                _libraryManager.DeleteItem(
+                    item,
+                    new DeleteOptions
+                    {
+                        DeleteFileLocation = false
+                    },
+                    false);
             }
 
             progress.Report(100);

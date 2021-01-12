@@ -1,41 +1,49 @@
-using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using MediaBrowser.XbmcMetadata.Parsers;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Providers
 {
+    /// <summary>
+    /// Nfo provider for episodes.
+    /// </summary>
     public class EpisodeNfoProvider : BaseNfoProvider<Episode>
     {
-        private readonly ILogger _logger;
+        private readonly ILogger<EpisodeNfoProvider> _logger;
         private readonly IConfigurationManager _config;
         private readonly IProviderManager _providerManager;
-        protected IXmlReaderSettingsFactory XmlReaderSettingsFactory { get; private set; }
 
-        public EpisodeNfoProvider(IFileSystem fileSystem, ILogger logger, IConfigurationManager config, IProviderManager providerManager, IXmlReaderSettingsFactory xmlReaderSettingsFactory)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="EpisodeNfoProvider"/> class.
+        /// </summary>
+        /// <param name="logger">The logger.</param>
+        /// <param name="fileSystem">The file system.</param>
+        /// <param name="config">the configuration manager.</param>
+        /// <param name="providerManager">The provider manager.</param>
+        public EpisodeNfoProvider(
+            ILogger<EpisodeNfoProvider> logger,
+            IFileSystem fileSystem,
+            IConfigurationManager config,
+            IProviderManager providerManager)
             : base(fileSystem)
         {
             _logger = logger;
             _config = config;
             _providerManager = providerManager;
-            XmlReaderSettingsFactory = xmlReaderSettingsFactory;
         }
 
+        /// <inheritdoc />
         protected override void Fetch(MetadataResult<Episode> result, string path, CancellationToken cancellationToken)
         {
-            var images = new List<LocalImageInfo>();
-
-            new EpisodeNfoParser(_logger, _config, _providerManager, FileSystem, XmlReaderSettingsFactory).Fetch(result, images, path, cancellationToken);
-
-            result.Images = images;
+            new EpisodeNfoParser(_logger, _config, _providerManager).Fetch(result, path, cancellationToken);
         }
 
+        /// <inheritdoc />
         protected override FileSystemMetadata GetXmlFile(ItemInfo info, IDirectoryService directoryService)
         {
             var path = Path.ChangeExtension(info.Path, ".nfo");

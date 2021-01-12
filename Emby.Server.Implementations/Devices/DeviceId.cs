@@ -1,8 +1,10 @@
+#pragma warning disable CS1591
+
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using MediaBrowser.Common.Configuration;
-using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Devices
@@ -10,8 +12,7 @@ namespace Emby.Server.Implementations.Devices
     public class DeviceId
     {
         private readonly IApplicationPaths _appPaths;
-        private readonly ILogger _logger;
-        private readonly IFileSystem _fileSystem;
+        private readonly ILogger<DeviceId> _logger;
 
         private readonly object _syncLock = new object();
 
@@ -68,7 +69,7 @@ namespace Emby.Server.Implementations.Devices
 
         private static string GetNewId()
         {
-            return Guid.NewGuid().ToString("N");
+            return Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
         }
 
         private string GetDeviceId()
@@ -86,19 +87,10 @@ namespace Emby.Server.Implementations.Devices
 
         private string _id;
 
-        public DeviceId(
-            IApplicationPaths appPaths,
-            ILoggerFactory loggerFactory,
-            IFileSystem fileSystem)
+        public DeviceId(IApplicationPaths appPaths, ILoggerFactory loggerFactory)
         {
-            if (fileSystem == null)
-            {
-                throw new ArgumentNullException(nameof(fileSystem));
-            }
-
             _appPaths = appPaths;
-            _logger = loggerFactory.CreateLogger("SystemId");
-            _fileSystem = fileSystem;
+            _logger = loggerFactory.CreateLogger<DeviceId>();
         }
 
         public string Value => _id ?? (_id = GetDeviceId());

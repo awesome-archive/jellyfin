@@ -1,14 +1,16 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.LiveTv;
 using MediaBrowser.Model.MediaInfo;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.LiveTv
 {
@@ -31,13 +33,13 @@ namespace MediaBrowser.Controller.LiveTv
             return UnratedItem.LiveTvChannel;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPositionTicksResume => false;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override SourceType SourceType => SourceType.LiveTV;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool EnableRememberingTrackSelections => false;
 
         /// <summary>
@@ -52,7 +54,7 @@ namespace MediaBrowser.Controller.LiveTv
         /// <value>The type of the channel.</value>
         public ChannelType ChannelType { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override LocationType LocationType => LocationType.Remote;
 
         protected override string CreateSortName()
@@ -63,14 +65,14 @@ namespace MediaBrowser.Controller.LiveTv
 
                 if (double.TryParse(Number, NumberStyles.Any, CultureInfo.InvariantCulture, out number))
                 {
-                    return string.Format("{0:00000.0}", number) + "-" + (Name ?? string.Empty);
+                    return string.Format(CultureInfo.InvariantCulture, "{0:00000.0}", number) + "-" + (Name ?? string.Empty);
                 }
             }
 
             return (Number ?? string.Empty) + "-" + (Name ?? string.Empty);
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string MediaType => ChannelType == ChannelType.Radio ? Model.Entities.MediaType.Audio : Model.Entities.MediaType.Video;
 
         public override string GetClientTypeName()
@@ -89,7 +91,7 @@ namespace MediaBrowser.Controller.LiveTv
 
             var info = new MediaSourceInfo
             {
-                Id = Id.ToString("N"),
+                Id = Id.ToString("N", CultureInfo.InvariantCulture),
                 Protocol = PathProtocol ?? MediaProtocol.File,
                 MediaStreams = new List<MediaStream>(),
                 Name = Name,
@@ -111,7 +113,7 @@ namespace MediaBrowser.Controller.LiveTv
 
         protected override string GetInternalMetadataPath(string basePath)
         {
-            return System.IO.Path.Combine(basePath, "livetv", Id.ToString("N"), "metadata");
+            return System.IO.Path.Combine(basePath, "livetv", Id.ToString("N", CultureInfo.InvariantCulture), "metadata");
         }
 
         public override bool CanDelete()
@@ -119,45 +121,45 @@ namespace MediaBrowser.Controller.LiveTv
             return false;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsMovie { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is sports.
         /// </summary>
         /// <value><c>true</c> if this instance is sports; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsSports { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is series.
         /// </summary>
         /// <value><c>true</c> if this instance is series; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsSeries { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is news.
         /// </summary>
         /// <value><c>true</c> if this instance is news; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsNews { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this instance is kids.
         /// </summary>
         /// <value><c>true</c> if this instance is kids; otherwise, <c>false</c>.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsKids => Tags.Contains("Kids", StringComparer.OrdinalIgnoreCase);
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsRepeat { get; set; }
 
         /// <summary>
         /// Gets or sets the episode title.
         /// </summary>
         /// <value>The episode title.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string EpisodeTitle { get; set; }
     }
 }

@@ -1,13 +1,15 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using MediaBrowser.Controller.Extensions;
-using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities
 {
     /// <summary>
-    /// Class Studio
+    /// Class Studio.
     /// </summary>
     public class Studio : BaseItem, IItemByName
     {
@@ -18,6 +20,7 @@ namespace MediaBrowser.Controller.Entities
             list.Insert(0, GetType().Name + "-" + (Name ?? string.Empty).RemoveDiacritics());
             return list;
         }
+
         public override string CreatePresentationUniqueKey()
         {
             return GetUserDataKeys()[0];
@@ -25,16 +28,16 @@ namespace MediaBrowser.Controller.Entities
 
         /// <summary>
         /// Returns the folder containing the item.
-        /// If the item is a folder, it returns the folder itself
+        /// If the item is a folder, it returns the folder itself.
         /// </summary>
         /// <value>The containing folder path.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override string ContainingFolderPath => Path;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool IsDisplayedAsFolder => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsAncestors => false;
 
         public override double GetDefaultPrimaryImageAspectRatio()
@@ -62,7 +65,7 @@ namespace MediaBrowser.Controller.Entities
             return LibraryManager.GetItemList(query);
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPeople => false;
 
         public static string GetPath(string name)
@@ -93,11 +96,12 @@ namespace MediaBrowser.Controller.Entities
                 Logger.LogDebug("{0} path has changed from {1} to {2}", GetType().Name, Path, newPath);
                 return true;
             }
+
             return base.RequiresRefresh();
         }
 
         /// <summary>
-        /// This is called before any metadata refresh and returns true or false indicating if changes were made
+        /// This is called before any metadata refresh and returns true or false indicating if changes were made.
         /// </summary>
         public override bool BeforeMetadataRefresh(bool replaceAllMetdata)
         {

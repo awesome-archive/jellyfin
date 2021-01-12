@@ -3,19 +3,27 @@ using System.Xml;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Parsers
 {
+    /// <summary>
+    /// Nfo parser for seasons.
+    /// </summary>
     public class SeasonNfoParser : BaseNfoParser<Season>
     {
         /// <summary>
-        /// Fetches the data from XML node.
+        /// Initializes a new instance of the <see cref="SeasonNfoParser"/> class.
         /// </summary>
-        /// <param name="reader">The reader.</param>
-        /// <param name="itemResult">The item result.</param>
+        /// <param name="logger">The logger.</param>
+        /// <param name="config">the configuration manager.</param>
+        /// <param name="providerManager">The provider manager.</param>
+        public SeasonNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager)
+            : base(logger, config, providerManager)
+        {
+        }
+
+        /// <inheritdoc />
         protected override void FetchDataFromXmlNode(XmlReader reader, MetadataResult<Season> itemResult)
         {
             var item = itemResult.Item;
@@ -33,6 +41,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                                 item.IndexNumber = num;
                             }
                         }
+
                         break;
                     }
 
@@ -40,10 +49,6 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                     base.FetchDataFromXmlNode(reader, itemResult);
                     break;
             }
-        }
-
-        public SeasonNfoParser(ILogger logger, IConfigurationManager config, IProviderManager providerManager, IFileSystem fileSystem, IXmlReaderSettingsFactory xmlReaderSettingsFactory) : base(logger, config, providerManager, fileSystem, xmlReaderSettingsFactory)
-        {
         }
     }
 }

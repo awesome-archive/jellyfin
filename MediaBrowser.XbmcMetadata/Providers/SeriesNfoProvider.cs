@@ -4,38 +4,47 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using MediaBrowser.XbmcMetadata.Parsers;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Providers
 {
+    /// <summary>
+    /// Nfo provider for series.
+    /// </summary>
     public class SeriesNfoProvider : BaseNfoProvider<Series>
     {
-        private readonly ILogger _logger;
+        private readonly ILogger<SeriesNfoProvider> _logger;
         private readonly IConfigurationManager _config;
         private readonly IProviderManager _providerManager;
-        private readonly IFileSystem _fileSystem;
-        protected IXmlReaderSettingsFactory XmlReaderSettingsFactory { get; private set; }
 
-        public SeriesNfoProvider(IFileSystem fileSystem, ILogger logger, IConfigurationManager config, IProviderManager providerManager, IFileSystem fileSystem1, IXmlReaderSettingsFactory xmlReaderSettingsFactory)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SeriesNfoProvider"/> class.
+        /// </summary>
+        /// <param name="logger">The logger.</param>
+        /// <param name="fileSystem">The file system.</param>
+        /// <param name="config">the configuration manager.</param>
+        /// <param name="providerManager">The provider manager.</param>
+        public SeriesNfoProvider(
+            ILogger<SeriesNfoProvider> logger,
+            IFileSystem fileSystem,
+            IConfigurationManager config,
+            IProviderManager providerManager)
             : base(fileSystem)
         {
             _logger = logger;
             _config = config;
             _providerManager = providerManager;
-            _fileSystem = fileSystem1;
-            XmlReaderSettingsFactory = xmlReaderSettingsFactory;
         }
 
+        /// <inheritdoc />
         protected override void Fetch(MetadataResult<Series> result, string path, CancellationToken cancellationToken)
         {
-            new SeriesNfoParser(_logger, _config, _providerManager, _fileSystem, XmlReaderSettingsFactory).Fetch(result, path, cancellationToken);
+            new SeriesNfoParser(_logger, _config, _providerManager).Fetch(result, path, cancellationToken);
         }
 
+        /// <inheritdoc />
         protected override FileSystemMetadata GetXmlFile(ItemInfo info, IDirectoryService directoryService)
-        {
-            return directoryService.GetFile(Path.Combine(info.Path, "tvshow.nfo"));
-        }
+            => directoryService.GetFile(Path.Combine(info.Path, "tvshow.nfo"));
     }
 }

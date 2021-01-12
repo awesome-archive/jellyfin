@@ -1,10 +1,15 @@
+#pragma warning disable CS1591
+
 using System;
+using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
+using Jellyfin.Data.Entities;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Common.Progress;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Querying;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Channels
 {
@@ -12,16 +17,18 @@ namespace MediaBrowser.Controller.Channels
     {
         public override bool IsVisible(User user)
         {
-            if (user.Policy.BlockedChannels != null)
+            var blockedChannelsPreference = user.GetPreferenceValues<Guid>(PreferenceKind.BlockedChannels);
+            if (blockedChannelsPreference.Length != 0)
             {
-                if (user.Policy.BlockedChannels.Contains(Id.ToString("N"), StringComparer.OrdinalIgnoreCase))
+                if (blockedChannelsPreference.Contains(Id))
                 {
                     return false;
                 }
             }
             else
             {
-                if (!user.Policy.EnableAllChannels && !user.Policy.EnabledChannels.Contains(Id.ToString("N"), StringComparer.OrdinalIgnoreCase))
+                if (!user.HasPermission(PermissionKind.EnableAllChannels)
+                    && !user.GetPreferenceValues<Guid>(PreferenceKind.EnabledChannels).Contains(Id))
                 {
                     return false;
                 }
@@ -30,10 +37,10 @@ namespace MediaBrowser.Controller.Channels
             return base.IsVisible(user);
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override SourceType SourceType => SourceType.Channel;
 
         protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
@@ -60,7 +67,7 @@ namespace MediaBrowser.Controller.Channels
 
         public static string GetInternalMetadataPath(string basePath, Guid id)
         {
-            return System.IO.Path.Combine(basePath, "channels", id.ToString("N"), "metadata");
+            return System.IO.Path.Combine(basePath, "channels", id.ToString("N", CultureInfo.InvariantCulture), "metadata");
         }
 
         public override bool CanDelete()

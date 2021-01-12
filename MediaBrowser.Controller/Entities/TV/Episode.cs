@@ -1,37 +1,44 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities.TV
 {
     /// <summary>
-    /// Class Episode
+    /// Class Episode.
     /// </summary>
     public class Episode : Video, IHasTrailers, IHasLookupInfo<EpisodeInfo>, IHasSeries
     {
         public Episode()
         {
-            RemoteTrailers = EmptyMediaUrlArray;
+            RemoteTrailers = Array.Empty<MediaUrl>();
             LocalTrailerIds = Array.Empty<Guid>();
             RemoteTrailerIds = Array.Empty<Guid>();
         }
 
-        public Guid[] LocalTrailerIds { get; set; }
-        public Guid[] RemoteTrailerIds { get; set; }
+        /// <inheritdoc />
+        public IReadOnlyList<Guid> LocalTrailerIds { get; set; }
+
+        /// <inheritdoc />
+        public IReadOnlyList<Guid> RemoteTrailerIds { get; set; }
 
         /// <summary>
         /// Gets the season in which it aired.
         /// </summary>
         /// <value>The aired season.</value>
         public int? AirsBeforeSeasonNumber { get; set; }
+
         public int? AirsAfterSeasonNumber { get; set; }
+
         public int? AirsBeforeEpisodeNumber { get; set; }
 
         /// <summary>
@@ -46,25 +53,25 @@ namespace MediaBrowser.Controller.Entities.TV
             return series == null ? SeriesName : series.SortName;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         protected override bool SupportsOwnedItems => IsStacked || MediaSourceCount > 1;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsPeople => true;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public int? AiredSeasonNumber => AirsAfterSeasonNumber ?? AirsBeforeSeasonNumber ?? ParentIndexNumber;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override Folder LatestItemsIndexContainer => Series;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override Guid DisplayParentId => SeasonId;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         protected override bool EnableDefaultVideoUserDataKeys => false;
 
         public override double GetDefaultPrimaryImageAspectRatio()
@@ -91,6 +98,7 @@ namespace MediaBrowser.Controller.Entities.TV
                 {
                     take--;
                 }
+
                 list.InsertRange(0, seriesUserDataKeys.Take(take).Select(i => i + ParentIndexNumber.Value.ToString("000") + IndexNumber.Value.ToString("000")));
             }
 
@@ -98,10 +106,10 @@ namespace MediaBrowser.Controller.Entities.TV
         }
 
         /// <summary>
-        /// This Episode's Series Instance
+        /// This Episode's Series Instance.
         /// </summary>
         /// <value>The series.</value>
-        [IgnoreDataMember]
+        [JsonIgnore]
         public Series Series
         {
             get
@@ -111,11 +119,12 @@ namespace MediaBrowser.Controller.Entities.TV
                 {
                     seriesId = FindSeriesId();
                 }
+
                 return !seriesId.Equals(Guid.Empty) ? (LibraryManager.GetItemById(seriesId) as Series) : null;
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public Season Season
         {
             get
@@ -125,20 +134,21 @@ namespace MediaBrowser.Controller.Entities.TV
                 {
                     seasonId = FindSeasonId();
                 }
+
                 return !seasonId.Equals(Guid.Empty) ? (LibraryManager.GetItemById(seasonId) as Season) : null;
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsInSeasonFolder => FindParent<Season>() != null;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string SeriesPresentationUniqueKey { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string SeriesName { get; set; }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public string SeasonName { get; set; }
 
         public string FindSeriesPresentationUniqueKey()
@@ -157,6 +167,7 @@ namespace MediaBrowser.Controller.Entities.TV
                 {
                     return "Season " + ParentIndexNumber.Value.ToString(CultureInfo.InvariantCulture);
                 }
+
                 return "Season Unknown";
             }
 
@@ -221,7 +232,7 @@ namespace MediaBrowser.Controller.Entities.TV
             return false;
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public override bool SupportsRemoteImageDownloading
         {
             get
@@ -235,12 +246,12 @@ namespace MediaBrowser.Controller.Entities.TV
             }
         }
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public bool IsMissingEpisode => LocationType == LocationType.Virtual;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
         public Guid SeasonId { get; set; }
-        [IgnoreDataMember]
+        [JsonIgnore]
         public Guid SeriesId { get; set; }
 
         public Guid FindSeriesId()
