@@ -3,106 +3,101 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.Library;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.System;
-using MediaBrowser.Model.Tasks;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.IO
 {
-    public class LibraryMonitor : ILibraryMonitor
+    /// <inheritdoc cref="ILibraryMonitor" />
+    public sealed class LibraryMonitor : ILibraryMonitor, IDisposable
     {
-        /// <summary>
-        /// The file system watchers
-        /// </summary>
-        private readonly ConcurrentDictionary<string, FileSystemWatcher> _fileSystemWatchers = new ConcurrentDictionary<string, FileSystemWatcher>(StringComparer.OrdinalIgnoreCase);
-        /// <summary>
-        /// The affected paths
-        /// </summary>
-        private readonly List<FileRefresher> _activeRefreshers = new List<FileRefresher>();
+        private readonly ILogger<LibraryMonitor> _logger;
+        private readonly ILibraryManager _libraryManager;
+        private readonly IServerConfigurationManager _configurationManager;
+        private readonly IFileSystem _fileSystem;
+        private readonly IDirectoryService _directoryService;
+        private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
 
         /// <summary>
-        /// A dynamic list of paths that should be ignored.  Added to during our own file sytem modifications.
+        /// The file system watchers.
         /// </summary>
-        private readonly ConcurrentDictionary<string, string> _tempIgnoredPaths = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, FileSystemWatcher> _fileSystemWatchers = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
-        /// Any file name ending in any of these will be ignored by the watchers
+        /// The affected paths.
         /// </summary>
-        private readonly HashSet<string> _alwaysIgnoreFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        private readonly List<FileRefresher> _activeRefreshers = [];
+
+        /// <summary>
+        /// A dynamic list of paths that should be ignored.  Added to during our own file system modifications.
+        /// </summary>
+        private readonly ConcurrentDictionary<string, string> _tempIgnoredPaths = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Incremented by every <see cref="Stop"/> so watchers still being created on a background
+        /// task can tell that the sweep they should have been caught by has already run.
+        /// </summary>
+        private int _watcherGeneration;
+
+        private bool _disposed;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="LibraryMonitor" /> class.
+        /// </summary>
+        /// <param name="logger">The logger.</param>
+        /// <param name="libraryManager">The library manager.</param>
+        /// <param name="configurationManager">The configuration manager.</param>
+        /// <param name="fileSystem">The filesystem.</param>
+        /// <param name="directoryService">The directory service.</param>
+        /// <param name="appLifetime">The <see cref="IHostApplicationLifetime"/>.</param>
+        /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
+        public LibraryMonitor(
+            ILogger<LibraryMonitor> logger,
+            ILibraryManager libraryManager,
+            IServerConfigurationManager configurationManager,
+            IFileSystem fileSystem,
+            IDirectoryService directoryService,
+            IHostApplicationLifetime appLifetime,
+            DotIgnoreIgnoreRule dotIgnoreIgnoreRule)
         {
-            "small.jpg",
-            "albumart.jpg",
+            _libraryManager = libraryManager;
+            _logger = logger;
+            _configurationManager = configurationManager;
+            _fileSystem = fileSystem;
+            _directoryService = directoryService;
+            _dotIgnoreIgnoreRule = dotIgnoreIgnoreRule;
 
-            // WMC temp recording directories that will constantly be written to
-            "TempRec",
-            "TempSBE"
-        };
+            appLifetime.ApplicationStarted.Register(Start);
+            appLifetime.ApplicationStopping.Register(Dispose);
+        }
 
-        private readonly string[] _alwaysIgnoreSubstrings = new string[]
+        /// <inheritdoc />
+        public void ReportFileSystemChangeBeginning(string path)
         {
-            // Synology
-            "eaDir",
-            "#recycle",
-            ".wd_tv",
-            ".actors"
-        };
+            ArgumentException.ThrowIfNullOrEmpty(path);
 
-        private readonly HashSet<string> _alwaysIgnoreExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            // thumbs.db
-            ".db",
-
-            // bts sync files
-            ".bts",
-            ".sync"
-        };
-
-        /// <summary>
-        /// Add the path to our temporary ignore list.  Use when writing to a path within our listening scope.
-        /// </summary>
-        /// <param name="path">The path.</param>
-        private void TemporarilyIgnore(string path)
-        {
             _tempIgnoredPaths[path] = path;
         }
 
-        public void ReportFileSystemChangeBeginning(string path)
-        {
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
-
-            TemporarilyIgnore(path);
-        }
-
-        public bool IsPathLocked(string path)
-        {
-            // This method is not used by the core but it used by auto-organize
-
-            var lockedPaths = _tempIgnoredPaths.Keys.ToList();
-            return lockedPaths.Any(i => _fileSystem.AreEqual(i, path) || _fileSystem.ContainsSubPath(i, path));
-        }
-
+        /// <inheritdoc />
         public async void ReportFileSystemChangeComplete(string path, bool refreshPath)
         {
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(path);
 
-            // This is an arbitraty amount of time, but delay it because file system writes often trigger events long after the file was actually written to.
+            // This is an arbitrary amount of time, but delay it because file system writes often trigger events long after the file was actually written to.
             // Seeing long delays in some situations, especially over the network, sometimes up to 45 seconds
             // But if we make this delay too high, we risk missing legitimate changes, such as user adding a new file, or hand-editing metadata
             await Task.Delay(45000).ConfigureAwait(false);
 
-            _tempIgnoredPaths.TryRemove(path, out var val);
+            _tempIgnoredPaths.TryRemove(path, out _);
 
             if (refreshPath)
             {
@@ -112,51 +107,9 @@ namespace Emby.Server.Implementations.IO
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError(ex, "Error in ReportFileSystemChanged for {path}", path);
+                    _logger.LogError(ex, "Error in ReportFileSystemChanged for {Path}", path);
                 }
             }
-        }
-
-        /// <summary>
-        /// Gets or sets the logger.
-        /// </summary>
-        /// <value>The logger.</value>
-        private ILogger Logger { get; set; }
-
-        /// <summary>
-        /// Gets or sets the task manager.
-        /// </summary>
-        /// <value>The task manager.</value>
-        private ITaskManager TaskManager { get; set; }
-
-        private ILibraryManager LibraryManager { get; set; }
-        private IServerConfigurationManager ConfigurationManager { get; set; }
-
-        private readonly IFileSystem _fileSystem;
-        private readonly IEnvironmentInfo _environmentInfo;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="LibraryMonitor" /> class.
-        /// </summary>
-        public LibraryMonitor(
-            ILoggerFactory loggerFactory,
-            ITaskManager taskManager,
-            ILibraryManager libraryManager,
-            IServerConfigurationManager configurationManager,
-            IFileSystem fileSystem,
-            IEnvironmentInfo environmentInfo)
-        {
-            if (taskManager == null)
-            {
-                throw new ArgumentNullException(nameof(taskManager));
-            }
-
-            LibraryManager = libraryManager;
-            TaskManager = taskManager;
-            Logger = loggerFactory.CreateLogger(GetType().Name);
-            ConfigurationManager = configurationManager;
-            _fileSystem = fileSystem;
-            _environmentInfo = environmentInfo;
         }
 
         private bool IsLibraryMonitorEnabled(BaseItem item)
@@ -166,32 +119,32 @@ namespace Emby.Server.Implementations.IO
                 return false;
             }
 
-            var options = LibraryManager.GetLibraryOptions(item);
+            var options = _libraryManager.GetLibraryOptions(item);
 
-            if (options != null)
-            {
-                return options.EnableRealtimeMonitor;
-            }
-
-            return false;
+            return options is not null && options.EnableRealtimeMonitor;
         }
 
+        /// <inheritdoc />
         public void Start()
         {
-            LibraryManager.ItemAdded += LibraryManager_ItemAdded;
-            LibraryManager.ItemRemoved += LibraryManager_ItemRemoved;
+            if (_disposed)
+            {
+                return;
+            }
 
-            var pathsToWatch = new List<string> { };
+            _libraryManager.ItemAdded += OnLibraryManagerItemAdded;
+            _libraryManager.ItemRemoved += OnLibraryManagerItemRemoved;
 
-            var paths = LibraryManager
+            var pathsToWatch = new List<string>();
+
+            var paths = _libraryManager
                 .RootFolder
                 .Children
                 .Where(IsLibraryMonitorEnabled)
                 .OfType<Folder>()
                 .SelectMany(f => f.PhysicalLocations)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(i => i)
-                .ToList();
+                .Distinct()
+                .Order();
 
             foreach (var path in paths)
             {
@@ -220,7 +173,7 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="ItemChangeEventArgs"/> instance containing the event data.</param>
-        void LibraryManager_ItemRemoved(object sender, ItemChangeEventArgs e)
+        private void OnLibraryManagerItemRemoved(object? sender, ItemChangeEventArgs e)
         {
             if (e.Parent is AggregateFolder)
             {
@@ -233,7 +186,7 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="ItemChangeEventArgs"/> instance containing the event data.</param>
-        void LibraryManager_ItemAdded(object sender, ItemChangeEventArgs e)
+        private void OnLibraryManagerItemAdded(object? sender, ItemChangeEventArgs e)
         {
             if (e.Parent is AggregateFolder)
             {
@@ -248,23 +201,29 @@ namespace Emby.Server.Implementations.IO
         /// <param name="lst">The LST.</param>
         /// <param name="path">The path.</param>
         /// <returns><c>true</c> if [contains parent folder] [the specified LST]; otherwise, <c>false</c>.</returns>
-        /// <exception cref="ArgumentNullException">path</exception>
-        private static bool ContainsParentFolder(IEnumerable<string> lst, string path)
+        /// <exception cref="ArgumentNullException"><paramref name="path"/> is <c>null</c>.</exception>
+        private static bool ContainsParentFolder(IReadOnlyList<string> lst, ReadOnlySpan<char> path)
         {
-            if (string.IsNullOrEmpty(path))
+            if (path.IsEmpty)
             {
-                throw new ArgumentNullException(nameof(path));
+                throw new ArgumentException("Path can't be empty", nameof(path));
             }
 
             path = path.TrimEnd(Path.DirectorySeparatorChar);
 
-            return lst.Any(str =>
+            foreach (var str in lst)
             {
-                //this should be a little quicker than examining each actual parent folder...
-                var compare = str.TrimEnd(Path.DirectorySeparatorChar);
+                // this should be a little quicker than examining each actual parent folder...
+                var compare = str.AsSpan().TrimEnd(Path.DirectorySeparatorChar);
 
-                return path.Equals(compare, StringComparison.OrdinalIgnoreCase) || (path.StartsWith(compare, StringComparison.OrdinalIgnoreCase) && path[compare.Length] == Path.DirectorySeparatorChar);
-            });
+                if (path.Equals(compare, StringComparison.OrdinalIgnoreCase)
+                    || (path.StartsWith(compare, StringComparison.OrdinalIgnoreCase) && path[compare.Length] == Path.DirectorySeparatorChar))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -276,22 +235,7 @@ namespace Emby.Server.Implementations.IO
             if (!Directory.Exists(path))
             {
                 // Seeing a crash in the mono runtime due to an exception being thrown on a different thread
-                Logger.LogInformation("Skipping realtime monitor for {0} because the path does not exist", path);
-                return;
-            }
-
-            if (_environmentInfo.OperatingSystem != MediaBrowser.Model.System.OperatingSystem.Windows)
-            {
-                if (path.StartsWith("\\\\", StringComparison.OrdinalIgnoreCase) || path.StartsWith("smb://", StringComparison.OrdinalIgnoreCase))
-                {
-                    // not supported
-                    return;
-                }
-            }
-
-            if (_environmentInfo.OperatingSystem == MediaBrowser.Model.System.OperatingSystem.Android)
-            {
-                // causing crashing
+                _logger.LogInformation("Skipping realtime monitor for {Path} because the path does not exist", path);
                 return;
             }
 
@@ -301,6 +245,8 @@ namespace Emby.Server.Implementations.IO
                 return;
             }
 
+            var generation = Volatile.Read(ref _watcherGeneration);
+
             // Creating a FileSystemWatcher over the LAN can take hundreds of milliseconds, so wrap it in a Task to do them all in parallel
             Task.Run(() =>
             {
@@ -308,38 +254,39 @@ namespace Emby.Server.Implementations.IO
                 {
                     var newWatcher = new FileSystemWatcher(path, "*")
                     {
-                        IncludeSubdirectories = true
+                        IncludeSubdirectories = true,
+                        InternalBufferSize = 65536,
+                        NotifyFilter = NotifyFilters.CreationTime |
+                                       NotifyFilters.DirectoryName |
+                                       NotifyFilters.FileName |
+                                       NotifyFilters.LastWrite |
+                                       NotifyFilters.Size |
+                                       NotifyFilters.Attributes
                     };
 
-                    newWatcher.InternalBufferSize = 65536;
+                    newWatcher.Created += OnWatcherChanged;
+                    newWatcher.Deleted += OnWatcherChanged;
+                    newWatcher.Renamed += OnWatcherChanged;
+                    newWatcher.Changed += OnWatcherChanged;
+                    newWatcher.Error += OnWatcherError;
 
-                    newWatcher.NotifyFilter = NotifyFilters.CreationTime |
-                        NotifyFilters.DirectoryName |
-                        NotifyFilters.FileName |
-                        NotifyFilters.LastWrite |
-                        NotifyFilters.Size |
-                        NotifyFilters.Attributes;
-
-                    newWatcher.Created += watcher_Changed;
-                    newWatcher.Deleted += watcher_Changed;
-                    newWatcher.Renamed += watcher_Changed;
-                    newWatcher.Changed += watcher_Changed;
-                    newWatcher.Error += watcher_Error;
-
-                    if (_fileSystemWatchers.TryAdd(path, newWatcher))
+                    if (_disposed || Volatile.Read(ref _watcherGeneration) != generation)
+                    {
+                        DisposeWatcher(newWatcher, false);
+                    }
+                    else if (_fileSystemWatchers.TryAdd(path, newWatcher))
                     {
                         newWatcher.EnableRaisingEvents = true;
-                        Logger.LogInformation("Watching directory " + path);
+                        _logger.LogInformation("Watching directory {Path}", path);
                     }
                     else
                     {
                         DisposeWatcher(newWatcher, false);
                     }
-
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError(ex, "Error watching path: {path}", path);
+                    _logger.LogError(ex, "Error watching path: {Path}", path);
                 }
             });
         }
@@ -365,49 +312,24 @@ namespace Emby.Server.Implementations.IO
             {
                 using (watcher)
                 {
-                    Logger.LogInformation("Stopping directory watching for path {path}", watcher.Path);
+                    _logger.LogInformation("Stopping directory watching for path {Path}", watcher.Path);
 
-                    watcher.Created -= watcher_Changed;
-                    watcher.Deleted -= watcher_Changed;
-                    watcher.Renamed -= watcher_Changed;
-                    watcher.Changed -= watcher_Changed;
-                    watcher.Error -= watcher_Error;
+                    watcher.Created -= OnWatcherChanged;
+                    watcher.Deleted -= OnWatcherChanged;
+                    watcher.Renamed -= OnWatcherChanged;
+                    watcher.Changed -= OnWatcherChanged;
+                    watcher.Error -= OnWatcherError;
 
-                    try
-                    {
-                        watcher.EnableRaisingEvents = false;
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // Seeing this under mono on linux sometimes
-                        // Collection was modified; enumeration operation may not execute.
-                    }
+                    watcher.EnableRaisingEvents = false;
                 }
-            }
-            catch (NotImplementedException)
-            {
-                // the dispose method on FileSystemWatcher is sometimes throwing NotImplementedException on Xamarin Android
-            }
-            catch
-            {
-
             }
             finally
             {
                 if (removeFromList)
                 {
-                    RemoveWatcherFromList(watcher);
+                    _fileSystemWatchers.TryRemove(watcher.Path, out _);
                 }
             }
-        }
-
-        /// <summary>
-        /// Removes the watcher from list.
-        /// </summary>
-        /// <param name="watcher">The watcher.</param>
-        private void RemoveWatcherFromList(FileSystemWatcher watcher)
-        {
-            _fileSystemWatchers.TryRemove(watcher.Path, out var removed);
         }
 
         /// <summary>
@@ -415,12 +337,18 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="ErrorEventArgs" /> instance containing the event data.</param>
-        void watcher_Error(object sender, ErrorEventArgs e)
+        private void OnWatcherError(object sender, ErrorEventArgs e)
         {
             var ex = e.GetException();
             var dw = (FileSystemWatcher)sender;
 
-            Logger.LogError(ex, "Error in Directory watcher for: {path}", dw.Path);
+            if (ex is UnauthorizedAccessException unauthorizedAccessException)
+            {
+                _logger.LogError(unauthorizedAccessException, "Permission error for Directory watcher: {Path}", dw.Path);
+                return;
+            }
+
+            _logger.LogError(ex, "Error in Directory watcher for: {Path}", dw.Path);
 
             DisposeWatcher(dw, true);
         }
@@ -430,77 +358,61 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="FileSystemEventArgs" /> instance containing the event data.</param>
-        void watcher_Changed(object sender, FileSystemEventArgs e)
+        private void OnWatcherChanged(object sender, FileSystemEventArgs e)
         {
             try
             {
-                //logger.LogDebug("Changed detected of type " + e.ChangeType + " to " + e.FullPath);
-
-                var path = e.FullPath;
-
-                ReportFileSystemChanged(path);
+                ReportFileSystemChanged(e.FullPath);
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "Exception in ReportFileSystemChanged. Path: {FullPath}", e.FullPath);
+                _logger.LogError(ex, "Exception in ReportFileSystemChanged. Path: {FullPath}", e.FullPath);
             }
         }
 
+        /// <inheritdoc />
         public void ReportFileSystemChanged(string path)
         {
-            if (string.IsNullOrEmpty(path))
+            ArgumentException.ThrowIfNullOrEmpty(path);
+
+            if (_disposed)
             {
-                throw new ArgumentNullException(nameof(path));
+                return;
             }
 
-            var filename = Path.GetFileName(path);
-
-            var monitorPath = !string.IsNullOrEmpty(filename) &&
-                !_alwaysIgnoreFiles.Contains(filename) &&
-                !_alwaysIgnoreExtensions.Contains(Path.GetExtension(path)) &&
-                _alwaysIgnoreSubstrings.All(i => path.IndexOf(i, StringComparison.OrdinalIgnoreCase) == -1);
-
-            // Ignore certain files
-            var tempIgnorePaths = _tempIgnoredPaths.Keys.ToList();
-
-            // If the parent of an ignored path has a change event, ignore that too
-            if (tempIgnorePaths.Any(i =>
+            if (IgnorePatterns.ShouldIgnore(path))
             {
-                if (_fileSystem.AreEqual(i, path))
-                {
-                    Logger.LogDebug("Ignoring change to {path}", path);
-                    return true;
-                }
+                return;
+            }
 
-                if (_fileSystem.ContainsSubPath(i, path))
+            var fileInfo = _fileSystem.GetFileSystemInfo(path);
+            if (_dotIgnoreIgnoreRule.ShouldIgnore(fileInfo, null))
+            {
+                return;
+            }
+
+            _directoryService.Invalidate(path);
+
+            // Ignore certain files, If the parent of an ignored path has a change event, ignore that too
+            foreach (var i in _tempIgnoredPaths.Keys)
+            {
+                if (_fileSystem.AreEqual(i, path)
+                    || _fileSystem.ContainsSubPath(i, path))
                 {
-                    Logger.LogDebug("Ignoring change to {path}", path);
-                    return true;
+                    _logger.LogDebug("Ignoring change to {Path}", path);
+                    return;
                 }
 
                 // Go up a level
                 var parent = Path.GetDirectoryName(i);
-                if (!string.IsNullOrEmpty(parent))
+                if (!string.IsNullOrEmpty(parent) && _fileSystem.AreEqual(parent, path))
                 {
-                    if (_fileSystem.AreEqual(parent, path))
-                    {
-                        Logger.LogDebug("Ignoring change to {path}", path);
-                        return true;
-                    }
+                    _logger.LogDebug("Ignoring change to {Path}", path);
+                    return;
                 }
-
-                return false;
-
-            }))
-            {
-                monitorPath = false;
             }
 
-            if (monitorPath)
-            {
-                // Avoid implicitly captured closure
-                CreateRefresher(path);
-            }
+            CreateRefresher(path);
         }
 
         private void CreateRefresher(string path)
@@ -509,8 +421,7 @@ namespace Emby.Server.Implementations.IO
 
             lock (_activeRefreshers)
             {
-                var refreshers = _activeRefreshers.ToList();
-                foreach (var refresher in refreshers)
+                foreach (var refresher in _activeRefreshers)
                 {
                     // Path is already being refreshed
                     if (_fileSystem.AreEqual(path, refresher.Path))
@@ -534,21 +445,27 @@ namespace Emby.Server.Implementations.IO
                     }
 
                     // They are siblings. Rebase the refresher to the parent folder.
-                    if (string.Equals(parentPath, Path.GetDirectoryName(refresher.Path), StringComparison.Ordinal))
+                    if (parentPath is not null
+                        && Path.GetDirectoryName(refresher.Path.AsSpan()).Equals(parentPath, StringComparison.Ordinal))
                     {
                         refresher.ResetPath(parentPath, path);
                         return;
                     }
                 }
 
-                var newRefresher = new FileRefresher(path, _fileSystem, ConfigurationManager, LibraryManager, TaskManager, Logger, _environmentInfo, LibraryManager);
-                newRefresher.Completed += NewRefresher_Completed;
+                var newRefresher = new FileRefresher(path, _configurationManager, _libraryManager, _logger);
+                newRefresher.Completed += OnNewRefresherCompleted;
                 _activeRefreshers.Add(newRefresher);
             }
         }
 
-        private void NewRefresher_Completed(object sender, EventArgs e)
+        private void OnNewRefresherCompleted(object? sender, EventArgs e)
         {
+            if (sender is null)
+            {
+                return;
+            }
+
             var refresher = (FileRefresher)sender;
             DisposeRefresher(refresher);
         }
@@ -558,8 +475,10 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         public void Stop()
         {
-            LibraryManager.ItemAdded -= LibraryManager_ItemAdded;
-            LibraryManager.ItemRemoved -= LibraryManager_ItemRemoved;
+            Interlocked.Increment(ref _watcherGeneration);
+
+            _libraryManager.ItemAdded -= OnLibraryManagerItemAdded;
+            _libraryManager.ItemRemoved -= OnLibraryManagerItemRemoved;
 
             foreach (var watcher in _fileSystemWatchers.Values.ToList())
             {
@@ -574,6 +493,7 @@ namespace Emby.Server.Implementations.IO
         {
             lock (_activeRefreshers)
             {
+                refresher.Completed -= OnNewRefresherCompleted;
                 refresher.Dispose();
                 _activeRefreshers.Remove(refresher);
             }
@@ -583,60 +503,27 @@ namespace Emby.Server.Implementations.IO
         {
             lock (_activeRefreshers)
             {
-                foreach (var refresher in _activeRefreshers.ToList())
+                foreach (var refresher in _activeRefreshers)
                 {
+                    refresher.Completed -= OnNewRefresherCompleted;
                     refresher.Dispose();
                 }
+
                 _activeRefreshers.Clear();
             }
         }
 
-        private bool _disposed;
-        /// <summary>
-        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
-        /// </summary>
+        /// <inheritdoc />
         public void Dispose()
-        {
-            Dispose(true);
-        }
-
-        /// <summary>
-        /// Releases unmanaged and - optionally - managed resources.
-        /// </summary>
-        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
-        protected virtual void Dispose(bool disposing)
         {
             if (_disposed)
             {
                 return;
             }
 
-            if (disposing)
-            {
-                Stop();
-            }
-
+            // Set before stopping so anything racing us stops handing out new work.
             _disposed = true;
-        }
-    }
-
-    public class LibraryMonitorStartup : IServerEntryPoint
-    {
-        private readonly ILibraryMonitor _monitor;
-
-        public LibraryMonitorStartup(ILibraryMonitor monitor)
-        {
-            _monitor = monitor;
-        }
-
-        public Task RunAsync()
-        {
-            _monitor.Start();
-            return Task.CompletedTask;
-        }
-
-        public void Dispose()
-        {
+            Stop();
         }
     }
 }

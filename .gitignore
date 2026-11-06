@@ -19,6 +19,7 @@ local.properties
 .classpath
 .settings/
 .loadpath
+*.lscache
 
 # External tool builders
 .externalToolBuilders/
@@ -150,8 +151,6 @@ publish/
 *.pubxml
 
 # NuGet Packages Directory
-## TODO: If you have NuGet Package Restore enabled, uncomment the next line
-# packages/
 dlls/
 dllssigned/
 
@@ -166,7 +165,6 @@ AppPackages/
 sql/
 *.Cache
 ClientBin/
-[Ss]tyle[Cc]op.*
 ~$*
 *~
 *.dbmdl
@@ -239,24 +237,19 @@ pip-log.txt
 ##########
 .idea/
 
-##########
-# Visual Studio Code
-##########
-.vscode/
-
 #########################
 # Build artifacts
 #########################
 
 # Artifacts for debian-x64
-deployment/debian-package-x64/pkg-src/.debhelper/
-deployment/debian-package-x64/pkg-src/*.debhelper
-deployment/debian-package-x64/pkg-src/debhelper-build-stamp
-deployment/debian-package-x64/pkg-src/files
-deployment/debian-package-x64/pkg-src/jellyfin.substvars
-deployment/debian-package-x64/pkg-src/jellyfin/
+debian/.debhelper/
+debian/*.debhelper
+debian/debhelper-build-stamp
+debian/files
+debian/jellyfin.substvars
+debian/jellyfin/
 # Don't ignore the debian/bin folder
-!deployment/debian-package-x64/pkg-src/bin/
+!debian/bin/
 
 deployment/**/dist/
 deployment/**/pkg-dist/
@@ -264,3 +257,28 @@ deployment/**/pkg-dist-tmp/
 deployment/collect-dist/
 
 jellyfin_version.ini
+
+ci/
+
+# Doxygen
+doc/
+
+# Deployment artifacts
+dist
+*.exe
+*.dll
+
+# BenchmarkDotNet artifacts
+BenchmarkDotNet.Artifacts
+
+# Ignore web artifacts from native builds
+web/
+web-src.*
+apiclient/generated
+
+# Omnisharp crash logs
+mono_crash.*.json
+
+# Devcontainer temp files
+.devcontainer/devcontainer-lock.json
+dotnet/

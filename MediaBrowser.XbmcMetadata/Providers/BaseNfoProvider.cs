@@ -1,3 +1,6 @@
+#pragma warning disable CS1591
+
+using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,9 +14,19 @@ namespace MediaBrowser.XbmcMetadata.Providers
     public abstract class BaseNfoProvider<T> : ILocalMetadataProvider<T>, IHasItemChangeMonitor
         where T : BaseItem, new()
     {
-        protected IFileSystem FileSystem;
+        private readonly IFileSystem _fileSystem;
 
-        public Task<MetadataResult<T>> GetMetadata(ItemInfo info,
+        protected BaseNfoProvider(IFileSystem fileSystem)
+        {
+            _fileSystem = fileSystem;
+        }
+
+        /// <inheritdoc />
+        public string Name => BaseNfoSaver.SaverName;
+
+        /// <inheritdoc />
+        public Task<MetadataResult<T>> GetMetadata(
+            ItemInfo info,
             IDirectoryService directoryService,
             CancellationToken cancellationToken)
         {
@@ -21,7 +34,7 @@ namespace MediaBrowser.XbmcMetadata.Providers
 
             var file = GetXmlFile(info, directoryService);
 
-            if (file == null)
+            if (file is null)
             {
                 return Task.FromResult(result);
             }
@@ -30,7 +43,10 @@ namespace MediaBrowser.XbmcMetadata.Providers
 
             try
             {
-                result.Item = new T();
+                result.Item = new T
+                {
+                    IndexNumber = info.IndexNumber
+                };
 
                 Fetch(result, path, cancellationToken);
                 result.HasMetadata = true;
@@ -47,27 +63,24 @@ namespace MediaBrowser.XbmcMetadata.Providers
             return Task.FromResult(result);
         }
 
-        protected abstract void Fetch(MetadataResult<T> result, string path, CancellationToken cancellationToken);
-
-        protected BaseNfoProvider(IFileSystem fileSystem)
-        {
-            FileSystem = fileSystem;
-        }
-
-        protected abstract FileSystemMetadata GetXmlFile(ItemInfo info, IDirectoryService directoryService);
-
+        /// <inheritdoc />
         public bool HasChanged(BaseItem item, IDirectoryService directoryService)
         {
             var file = GetXmlFile(new ItemInfo(item), directoryService);
 
-            if (file == null)
+            if (file?.Exists is not true)
             {
                 return false;
             }
 
-            return file.Exists && FileSystem.GetLastWriteTimeUtc(file) > item.DateLastSaved;
+            var fileTime = _fileSystem.GetLastWriteTimeUtc(file);
+
+            // 1 minute tolerance to avoid detecting our own file writes
+            return (fileTime - item.DateLastSaved) > TimeSpan.FromMinutes(1);
         }
 
-        public string Name => BaseNfoSaver.SaverName;
+        protected abstract void Fetch(MetadataResult<T> result, string path, CancellationToken cancellationToken);
+
+        protected abstract FileSystemMetadata? GetXmlFile(ItemInfo info, IDirectoryService directoryService);
     }
 }

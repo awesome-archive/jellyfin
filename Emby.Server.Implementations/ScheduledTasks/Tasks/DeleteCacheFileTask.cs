@@ -5,171 +5,139 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.IO;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Emby.Server.Implementations.ScheduledTasks.Tasks
+namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
+
+/// <summary>
+/// Deletes old cache files.
+/// </summary>
+public class DeleteCacheFileTask : IScheduledTask, IConfigurableScheduledTask
 {
     /// <summary>
-    /// Deletes old cache files
+    /// Gets or sets the application paths.
     /// </summary>
-    public class DeleteCacheFileTask : IScheduledTask, IConfigurableScheduledTask
+    /// <value>The application paths.</value>
+    private readonly IApplicationPaths _applicationPaths;
+    private readonly ILogger<DeleteCacheFileTask> _logger;
+    private readonly IFileSystem _fileSystem;
+    private readonly ILocalizationManager _localization;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DeleteCacheFileTask" /> class.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
+    /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    public DeleteCacheFileTask(
+        IApplicationPaths appPaths,
+        ILogger<DeleteCacheFileTask> logger,
+        IFileSystem fileSystem,
+        ILocalizationManager localization)
     {
-        /// <summary>
-        /// Gets or sets the application paths.
-        /// </summary>
-        /// <value>The application paths.</value>
-        private IApplicationPaths ApplicationPaths { get; set; }
+        _applicationPaths = appPaths;
+        _logger = logger;
+        _fileSystem = fileSystem;
+        _localization = localization;
+    }
 
-        private readonly ILogger _logger;
+    /// <inheritdoc />
+    public string Name => _localization.GetLocalizedString("TaskCleanCache");
 
-        private readonly IFileSystem _fileSystem;
+    /// <inheritdoc />
+    public string Description => _localization.GetLocalizedString("TaskCleanCacheDescription");
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="DeleteCacheFileTask" /> class.
-        /// </summary>
-        public DeleteCacheFileTask(IApplicationPaths appPaths, ILogger logger, IFileSystem fileSystem)
+    /// <inheritdoc />
+    public string Category => _localization.GetLocalizedString("TasksMaintenanceCategory");
+
+    /// <inheritdoc />
+    public string Key => "DeleteCacheFiles";
+
+    /// <inheritdoc />
+    public bool IsHidden => false;
+
+    /// <inheritdoc />
+    public bool IsEnabled => true;
+
+    /// <inheritdoc />
+    public bool IsLogged => true;
+
+    /// <inheritdoc />
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        yield return new TaskTriggerInfo
         {
-            ApplicationPaths = appPaths;
-            _logger = logger;
-            _fileSystem = fileSystem;
+            Type = TaskTriggerInfoType.IntervalTrigger,
+            IntervalTicks = TimeSpan.FromHours(24).Ticks
+        };
+    }
+
+    /// <inheritdoc />
+    public Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var minDateModified = DateTime.UtcNow.AddDays(-30);
+
+        try
+        {
+            DeleteCacheFilesFromDirectory(_applicationPaths.CachePath, minDateModified, progress, cancellationToken);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // No biggie here. Nothing to delete
         }
 
-        /// <summary>
-        /// Creates the triggers that define when the task will run
-        /// </summary>
-        /// <returns>IEnumerable{BaseTaskTrigger}.</returns>
-        public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
-        {
-            return new[] {
+        progress.Report(90);
 
-                // Every so often
-                new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerInterval, IntervalTicks = TimeSpan.FromHours(24).Ticks}
-            };
+        minDateModified = DateTime.UtcNow.AddDays(-1);
+
+        try
+        {
+            DeleteCacheFilesFromDirectory(_applicationPaths.TempDirectory, minDateModified, progress, cancellationToken);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // No biggie here. Nothing to delete
         }
 
-        /// <summary>
-        /// Returns the task to be executed
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Deletes the cache files from directory with a last write time less than a given date.
+    /// </summary>
+    /// <param name="directory">The directory.</param>
+    /// <param name="minDateModified">The min date modified.</param>
+    /// <param name="progress">The progress.</param>
+    /// <param name="cancellationToken">The task cancellation token.</param>
+    private void DeleteCacheFilesFromDirectory(string directory, DateTime minDateModified, IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var filesToDelete = _fileSystem.GetFiles(directory, true)
+            .Where(f => _fileSystem.GetLastWriteTimeUtc(f) < minDateModified)
+            .ToList();
+
+        var index = 0;
+
+        foreach (var file in filesToDelete)
         {
-            var minDateModified = DateTime.UtcNow.AddDays(-30);
+            double percent = index;
+            percent /= filesToDelete.Count;
 
-            try
-            {
-                DeleteCacheFilesFromDirectory(cancellationToken, ApplicationPaths.CachePath, minDateModified, progress);
-            }
-            catch (DirectoryNotFoundException)
-            {
-                // No biggie here. Nothing to delete
-            }
+            progress.Report(100 * percent);
 
-            progress.Report(90);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            minDateModified = DateTime.UtcNow.AddDays(-1);
+            FileSystemHelper.DeleteFile(_fileSystem, file.FullName, _logger);
 
-            try
-            {
-                DeleteCacheFilesFromDirectory(cancellationToken, ApplicationPaths.TempDirectory, minDateModified, progress);
-            }
-            catch (DirectoryNotFoundException)
-            {
-                // No biggie here. Nothing to delete
-            }
-
-            return Task.CompletedTask;
+            index++;
         }
 
+        FileSystemHelper.DeleteEmptyFolders(_fileSystem, directory, _logger);
 
-        /// <summary>
-        /// Deletes the cache files from directory with a last write time less than a given date
-        /// </summary>
-        /// <param name="cancellationToken">The task cancellation token.</param>
-        /// <param name="directory">The directory.</param>
-        /// <param name="minDateModified">The min date modified.</param>
-        /// <param name="progress">The progress.</param>
-        private void DeleteCacheFilesFromDirectory(CancellationToken cancellationToken, string directory, DateTime minDateModified, IProgress<double> progress)
-        {
-            var filesToDelete = _fileSystem.GetFiles(directory, true)
-                .Where(f => _fileSystem.GetLastWriteTimeUtc(f) < minDateModified)
-                .ToList();
-
-            var index = 0;
-
-            foreach (var file in filesToDelete)
-            {
-                double percent = index;
-                percent /= filesToDelete.Count;
-
-                progress.Report(100 * percent);
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                DeleteFile(file.FullName);
-
-                index++;
-            }
-
-            DeleteEmptyFolders(directory);
-
-            progress.Report(100);
-        }
-
-        private void DeleteEmptyFolders(string parent)
-        {
-            foreach (var directory in _fileSystem.GetDirectoryPaths(parent))
-            {
-                DeleteEmptyFolders(directory);
-                if (!_fileSystem.GetFileSystemEntryPaths(directory).Any())
-                {
-                    try
-                    {
-                        Directory.Delete(directory, false);
-                    }
-                    catch (UnauthorizedAccessException ex)
-                    {
-                        _logger.LogError(ex, "Error deleting directory {path}", directory);
-                    }
-                    catch (IOException ex)
-                    {
-                        _logger.LogError(ex, "Error deleting directory {path}", directory);
-                    }
-                }
-            }
-        }
-
-        private void DeleteFile(string path)
-        {
-            try
-            {
-                _fileSystem.DeleteFile(path);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogError(ex, "Error deleting file {path}", path);
-            }
-            catch (IOException ex)
-            {
-                _logger.LogError(ex, "Error deleting file {path}", path);
-            }
-        }
-
-        public string Name => "Cache file cleanup";
-
-        public string Description => "Deletes cache files no longer needed by the system";
-
-        public string Category => "Maintenance";
-
-        public string Key => "DeleteCacheFiles";
-
-        public bool IsHidden => false;
-
-        public bool IsEnabled => true;
-
-        public bool IsLogged => true;
+        progress.Report(100);
     }
 }

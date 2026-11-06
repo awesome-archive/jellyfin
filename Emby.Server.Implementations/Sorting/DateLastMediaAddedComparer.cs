@@ -1,30 +1,21 @@
+#nullable disable
+#pragma warning disable CS1591
+
 using System;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Model.Querying;
 
 namespace Emby.Server.Implementations.Sorting
 {
-    public class DateLastMediaAddedComparer : IUserBaseItemComparer
+    public class DateLastMediaAddedComparer : IBaseItemComparer
     {
         /// <summary>
-        /// Gets or sets the user.
+        /// Gets the name.
         /// </summary>
-        /// <value>The user.</value>
-        public User User { get; set; }
-
-        /// <summary>
-        /// Gets or sets the user manager.
-        /// </summary>
-        /// <value>The user manager.</value>
-        public IUserManager UserManager { get; set; }
-
-        /// <summary>
-        /// Gets or sets the user data repository.
-        /// </summary>
-        /// <value>The user data repository.</value>
-        public IUserDataManager UserDataRepository { get; set; }
+        /// <value>The name.</value>
+        public ItemSortBy Type => ItemSortBy.DateLastContentAdded;
 
         /// <summary>
         /// Compares the specified x.
@@ -44,9 +35,7 @@ namespace Emby.Server.Implementations.Sorting
         /// <returns>DateTime.</returns>
         private static DateTime GetDate(BaseItem x)
         {
-            var folder = x as Folder;
-
-            if (folder != null)
+            if (x is Folder folder)
             {
                 if (folder.DateLastMediaAdded.HasValue)
                 {
@@ -56,11 +45,5 @@ namespace Emby.Server.Implementations.Sorting
 
             return DateTime.MinValue;
         }
-
-        /// <summary>
-        /// Gets the name.
-        /// </summary>
-        /// <value>The name.</value>
-        public string Name => ItemSortBy.DateLastContentAdded;
     }
 }

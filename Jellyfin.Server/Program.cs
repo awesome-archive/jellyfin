@@ -1,443 +1,415 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Net.Security;
 using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CommandLine;
-using Emby.Drawing;
 using Emby.Server.Implementations;
-using Emby.Server.Implementations.EnvironmentInfo;
-using Emby.Server.Implementations.IO;
-using Emby.Server.Implementations.Networking;
-using Jellyfin.Drawing.Skia;
+using Emby.Server.Implementations.Configuration;
+using Emby.Server.Implementations.Serialization;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Server.Extensions;
+using Jellyfin.Server.Helpers;
+using Jellyfin.Server.Implementations.DatabaseConfiguration;
+using Jellyfin.Server.Implementations.Extensions;
+using Jellyfin.Server.Implementations.StorageHelpers;
+using Jellyfin.Server.Implementations.SystemBackupService;
+using Jellyfin.Server.Migrations;
+using Jellyfin.Server.Migrations.Stages;
+using Jellyfin.Server.ServerSetupApp;
 using MediaBrowser.Common.Configuration;
-using MediaBrowser.Controller.Drawing;
-using MediaBrowser.Model.Globalization;
-using MediaBrowser.Model.IO;
+using MediaBrowser.Common.Net;
+using MediaBrowser.Controller;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Serilog;
-using Serilog.AspNetCore;
+using Serilog.Extensions.Logging;
+using static MediaBrowser.Controller.Extensions.ConfigurationExtensions;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
 namespace Jellyfin.Server
 {
+    /// <summary>
+    /// Class containing the entry point of the application.
+    /// </summary>
     public static class Program
     {
-        private static readonly CancellationTokenSource _tokenSource = new CancellationTokenSource();
-        private static readonly ILoggerFactory _loggerFactory = new SerilogLoggerFactory();
-        private static ILogger _logger;
+        /// <summary>
+        /// The name of logging configuration file containing application defaults.
+        /// </summary>
+        public const string LoggingConfigFileDefault = "logging.default.json";
+
+        /// <summary>
+        /// The name of the logging configuration file containing the system-specific override settings.
+        /// </summary>
+        public const string LoggingConfigFileSystem = "logging.json";
+
+        private static readonly SerilogLoggerFactory _loggerFactory = new SerilogLoggerFactory();
+        private static SetupServer? _setupServer;
+        private static CoreAppHost? _appHost;
+        private static IHost? _jellyfinHost = null;
+        private static long _startTimestamp;
+        private static ILogger _logger = NullLogger.Instance;
         private static bool _restartOnShutdown;
+        private static IStartupLogger<JellyfinMigrationService>? _migrationLogger;
+        private static bool _optimizeDatabaseAfterMigration;
+        private static string? _restoreFromBackup;
 
-        public static async Task Main(string[] args)
+        /// <summary>
+        /// The entry point of the application.
+        /// </summary>
+        /// <param name="args">The command line arguments passed.</param>
+        /// <returns><see cref="Task" />.</returns>
+        public static Task Main(string[] args)
         {
-            // For backwards compatibility.
-            // Modify any input arguments now which start with single-hyphen to POSIX standard
-            // double-hyphen to allow parsing by CommandLineParser package.
-            const string pattern = @"^(-[^-\s]{2})"; // Match -xx, not -x, not --xx, not xx
-            const string substitution = @"-$1"; // Prepend with additional single-hyphen
-            var regex = new Regex(pattern);
-
-            for (var i = 0; i < args.Length; i++)
+            static Task ErrorParsingArguments(IEnumerable<Error> errors)
             {
-                args[i] = regex.Replace(args[i], substitution);
+                Environment.ExitCode = 1;
+                return Task.CompletedTask;
             }
 
             // Parse the command line arguments and either start the app or exit indicating error
-            await Parser.Default.ParseArguments<StartupOptions>(args)
-                .MapResult(
-                    options => StartApp(options),
-                    errs => Task.FromResult(0)).ConfigureAwait(false);
-        }
-
-        public static void Shutdown()
-        {
-            if (!_tokenSource.IsCancellationRequested)
-            {
-                _tokenSource.Cancel();
-            }
-        }
-
-        public static void Restart()
-        {
-            _restartOnShutdown = true;
-
-            Shutdown();
+            return Parser.Default.ParseArguments<StartupOptions>(args)
+                .MapResult(StartApp, ErrorParsingArguments);
         }
 
         private static async Task StartApp(StartupOptions options)
         {
-            ServerApplicationPaths appPaths = CreateApplicationPaths(options);
+            _restoreFromBackup = options.RestoreArchive;
+            _startTimestamp = Stopwatch.GetTimestamp();
+            ServerApplicationPaths appPaths = StartupHelpers.CreateApplicationPaths(options);
+            appPaths.MakeSanityCheckOrThrow();
 
             // $JELLYFIN_LOG_DIR needs to be set for the logger configuration manager
             Environment.SetEnvironmentVariable("JELLYFIN_LOG_DIR", appPaths.LogDirectoryPath);
-            await CreateLogger(appPaths).ConfigureAwait(false);
-            _logger = _loggerFactory.CreateLogger("Main");
 
-            AppDomain.CurrentDomain.UnhandledException += (sender, e)
+            // Enable cl-va P010 interop for tonemapping on Intel VAAPI
+            Environment.SetEnvironmentVariable("NEOReadDebugKeys", "1");
+            Environment.SetEnvironmentVariable("EnableExtendedVaFormats", "1");
+
+            await StartupHelpers.InitLoggingConfigFile(appPaths).ConfigureAwait(false);
+
+            // Create an instance of the application configuration to use for application startup
+            IConfiguration startupConfig = CreateAppConfiguration(options, appPaths);
+            StartupHelpers.InitializeLoggingFramework(startupConfig, appPaths);
+            _setupServer = new SetupServer(static () => _jellyfinHost?.Services?.GetService<INetworkManager>(), appPaths, static () => _appHost, _loggerFactory, startupConfig);
+            await _setupServer.RunAsync().ConfigureAwait(false);
+            _logger = _loggerFactory.CreateLogger("Main");
+            StartupLogger.Logger = new StartupLogger(_logger);
+
+            // Use the logging framework for uncaught exceptions instead of std error
+            AppDomain.CurrentDomain.UnhandledException += (_, e)
                 => _logger.LogCritical((Exception)e.ExceptionObject, "Unhandled Exception");
 
-            // Intercept Ctrl+C and Ctrl+Break
-            Console.CancelKeyPress += (sender, e) =>
+            _logger.LogInformation(
+                "Jellyfin version: {Version}",
+                Assembly.GetEntryAssembly()!.GetName().Version!.ToString(3));
+
+            StartupHelpers.LogEnvironmentInfo(_logger, appPaths);
+
+            // If hosting the web client, validate the client content path
+            if (startupConfig.HostWebClient())
             {
-                if (_tokenSource.IsCancellationRequested)
+                var webContentPath = appPaths.WebPath;
+                if (!Directory.Exists(webContentPath) || !Directory.EnumerateFiles(webContentPath).Any())
                 {
-                    return; // Already shutting down
-                }
-
-                e.Cancel = true;
-                _logger.LogInformation("Ctrl+C, shutting down");
-                Environment.ExitCode = 128 + 2;
-                Shutdown();
-            };
-
-            // Register a SIGTERM handler
-            AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
-            {
-                if (_tokenSource.IsCancellationRequested)
-                {
-                    return; // Already shutting down
-                }
-
-                _logger.LogInformation("Received a SIGTERM signal, shutting down");
-                Environment.ExitCode = 128 + 15;
-                Shutdown();
-            };
-
-            _logger.LogInformation("Jellyfin version: {Version}", Assembly.GetEntryAssembly().GetName().Version);
-
-            EnvironmentInfo environmentInfo = new EnvironmentInfo(GetOperatingSystem());
-            ApplicationHost.LogEnvironmentInfo(_logger, appPaths, environmentInfo);
-
-            SQLitePCL.Batteries_V2.Init();
-
-            // Allow all https requests
-            ServicePointManager.ServerCertificateValidationCallback = new RemoteCertificateValidationCallback(delegate { return true; } );
-
-            var fileSystem = new ManagedFileSystem(_loggerFactory, environmentInfo, null, appPaths.TempDirectory, true);
-
-            using (var appHost = new CoreAppHost(
-                appPaths,
-                _loggerFactory,
-                options,
-                fileSystem,
-                environmentInfo,
-                new NullImageEncoder(),
-                new NetworkManager(_loggerFactory, environmentInfo)))
-            {
-                await appHost.Init(new ServiceCollection()).ConfigureAwait(false);
-
-                appHost.ImageProcessor.ImageEncoder = GetImageEncoder(fileSystem, appPaths, appHost.LocalizationManager);
-
-                await appHost.RunStartupTasks().ConfigureAwait(false);
-
-                // TODO: read input for a stop command
-
-                try
-                {
-                    // Block main thread until shutdown
-                    await Task.Delay(-1, _tokenSource.Token).ConfigureAwait(false);
-                }
-                catch (TaskCanceledException)
-                {
-                    // Don't throw on cancellation
+                    _logger.LogError(
+                        "The server is expected to host the web client, but the provided content directory is either " +
+                        "invalid or empty: {WebContentPath}. If you do not want to host the web client with the " +
+                        "server, you may set the '--nowebclient' command line flag, or set" +
+                        "'{ConfigKey}=false' in your config settings",
+                        webContentPath,
+                        HostWebClientKey);
+                    Environment.ExitCode = 1;
+                    return;
                 }
             }
 
-            if (_restartOnShutdown)
+            SetupServer.ReportActivity(StartupActivity.CheckingStorage);
+            StorageHelper.TestCommonPathsForStorageCapacity(appPaths, StartupLogger.Logger.With(_loggerFactory.CreateLogger<Startup>()).BeginGroup($"Storage Check"));
+
+            StartupHelpers.PerformStaticInitialization();
+
+            SetupServer.ReportActivity(StartupActivity.Initializing);
+            await ApplyStartupMigrationAsync(appPaths, startupConfig, options).ConfigureAwait(false);
+
+            do
             {
-                StartNewInstance(options);
+                await StartServer(appPaths, options, startupConfig).ConfigureAwait(false);
+
+                if (_restartOnShutdown)
+                {
+                    _startTimestamp = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        await _setupServer.StopAsync().ConfigureAwait(false);
+                        await _setupServer.RunAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        // The startup page is optional, losing it must not take the restart down with it.
+                        _logger.LogError(ex, "Failed to bring the startup server back up");
+                    }
+                }
+            } while (_restartOnShutdown);
+
+            _setupServer.Dispose();
+        }
+
+        private static async Task StartServer(IServerApplicationPaths appPaths, StartupOptions options, IConfiguration startupConfig)
+        {
+            using CoreAppHost appHost = new CoreAppHost(
+                            appPaths,
+                            _loggerFactory,
+                            options,
+                            startupConfig);
+            var configurationCompleted = false;
+            try
+            {
+                _jellyfinHost = Host.CreateDefaultBuilder()
+                    .UseConsoleLifetime()
+                    .ConfigureServices(services => appHost.Init(services))
+                    .ConfigureWebHostDefaults(webHostBuilder =>
+                    {
+                        webHostBuilder.ConfigureWebHostBuilder(appHost, startupConfig, appPaths, _logger);
+                        if (bool.TryParse(Environment.GetEnvironmentVariable("JELLYFIN_ENABLE_IIS"), out var iisEnabled) && iisEnabled)
+                        {
+                            _logger.LogCritical("UNSUPPORTED HOSTING ENVIRONMENT Microsoft Internet Information Services. The option to run Jellyfin on IIS is an unsupported and untested feature. Only use at your own discretion.");
+                            webHostBuilder.UseIIS();
+                        }
+                    })
+                    .ConfigureAppConfiguration(config => config.ConfigureAppConfiguration(options, appPaths, startupConfig))
+                    .UseSerilog()
+                    .ConfigureServices(e => e.RegisterStartupLogger())
+                    .Build();
+
+                /*
+                 * Initialize the transcode path marker so we avoid starting Jellyfin in a broken state.
+                 * This should really be a part of IApplicationPaths but this path is configured differently.
+                 */
+                _ = appHost.ConfigurationManager.GetTranscodePath();
+
+                // Re-use the host service provider in the app host since ASP.NET doesn't allow a custom service collection.
+                appHost.ServiceProvider = _jellyfinHost.Services;
+                PrepareDatabaseProvider(appHost.ServiceProvider);
+
+                if (!string.IsNullOrWhiteSpace(_restoreFromBackup))
+                {
+                    SetupServer.ReportActivity(StartupActivity.RestoringBackup);
+                    await appHost.ServiceProvider.GetService<IBackupService>()!.RestoreBackupAsync(_restoreFromBackup).ConfigureAwait(false);
+                    _restoreFromBackup = null;
+                    _restartOnShutdown = true;
+                    return;
+                }
+
+                var jellyfinMigrationService = ActivatorUtilities.CreateInstance<JellyfinMigrationService>(appHost.ServiceProvider);
+                SetupServer.ReportActivity(StartupActivity.PreparingMigrations);
+                await jellyfinMigrationService.PrepareSystemForMigration(_logger).ConfigureAwait(false);
+                // "Preparing migrations" carries through the DB read; per-migration progress is reported
+                // as "Running migration X of Y" from inside the step once the pending set is known.
+                _optimizeDatabaseAfterMigration |= await jellyfinMigrationService.MigrateStepAsync(JellyfinMigrationStageTypes.CoreInitialisation, appHost.ServiceProvider).ConfigureAwait(false);
+
+                SetupServer.ReportActivity(StartupActivity.InitializingServices);
+                await appHost.InitializeServices(startupConfig).ConfigureAwait(false);
+                _appHost = appHost;
+
+                _optimizeDatabaseAfterMigration |= await jellyfinMigrationService.MigrateStepAsync(JellyfinMigrationStageTypes.AppInitialisation, appHost.ServiceProvider).ConfigureAwait(false);
+                await jellyfinMigrationService.CleanupSystemAfterMigration(_logger).ConfigureAwait(false);
+                await OptimizeDatabaseAfterMigrationAsync(appHost.ServiceProvider).ConfigureAwait(false);
+                try
+                {
+                    configurationCompleted = true;
+                    await _setupServer!.StopAsync().ConfigureAwait(false);
+
+                    if (options.StartupMode is null or Configuration.StartupMode.MediaServer)
+                    {
+                        await _jellyfinHost.StartAsync().ConfigureAwait(false);
+
+                        if (!OperatingSystem.IsWindows() && startupConfig.UseUnixSocket())
+                        {
+                            var socketPath = StartupHelpers.GetUnixSocketPath(startupConfig, appPaths);
+
+                            StartupHelpers.SetUnixSocketPermissions(startupConfig, socketPath, _logger);
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    _logger.LogError("Kestrel failed to start! This is most likely due to an invalid address or port bind - correct your bind configuration in network.xml and try again");
+                    throw;
+                }
+
+                if (options.StartupMode is null or Configuration.StartupMode.MediaServer)
+                {
+                    await appHost.RunStartupTasksAsync().ConfigureAwait(false);
+                    _logger.LogInformation("Startup complete {Time:g}", Stopwatch.GetElapsedTime(_startTimestamp));
+
+                    try
+                    {
+                        await _jellyfinHost.WaitForShutdownAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A hosted service that throws or times out while stopping must not cancel a pending restart.
+                        _logger.LogError(ex, "Failure while stopping the server");
+                    }
+                }
+
+                _restartOnShutdown = appHost.ShouldRestart;
+                _restoreFromBackup = appHost.RestoreBackupPath;
+            }
+            catch (Exception ex)
+            {
+                _restartOnShutdown = false;
+                _logger.LogCritical(ex, "Error while starting server");
+                if (_setupServer!.IsAlive && !configurationCompleted)
+                {
+                    _setupServer!.SoftStop();
+                    if (options.StartupMode is null or Configuration.StartupMode.MediaServer)
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(10)).ConfigureAwait(false);
+                    }
+
+                    await _setupServer!.StopAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                // Don't throw additional exception if startup failed.
+                if (appHost.ServiceProvider is not null)
+                {
+                    _logger.LogInformation("Preparing the database for shutdown...");
+
+                    var databaseProvider = appHost.ServiceProvider.GetRequiredService<IJellyfinDatabaseProvider>();
+                    await databaseProvider.RunShutdownTask(CancellationToken.None).ConfigureAwait(false);
+                }
+
+                _appHost = null;
+                _jellyfinHost?.Dispose();
+                _jellyfinHost = null;
             }
         }
 
         /// <summary>
-        /// Create the data, config and log paths from the variety of inputs(command line args,
-        /// environment variables) or decide on what default to use.  For Windows it's %AppPath%
-        /// for everything else the XDG approach is followed:
-        /// https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+        /// [Internal]Runs the startup Migrations.
         /// </summary>
-        /// <param name="options">StartupOptions</param>
-        /// <returns>ServerApplicationPaths</returns>
-        private static ServerApplicationPaths CreateApplicationPaths(StartupOptions options)
+        /// <remarks>
+        /// Not intended to be used other then by jellyfin and its tests.
+        /// </remarks>
+        /// <param name="appPaths">Application Paths.</param>
+        /// <param name="startupConfig">Startup Config.</param>
+        /// <param name="startupOptions">The applications startup options.</param>
+        /// <returns>A task.</returns>
+        public static async Task ApplyStartupMigrationAsync(ServerApplicationPaths appPaths, IConfiguration startupConfig, StartupOptions startupOptions)
         {
-            // dataDir
-            // IF      --datadir
-            // ELSE IF $JELLYFIN_DATA_PATH
-            // ELSE IF windows, use <%APPDATA%>/jellyfin
-            // ELSE IF $XDG_DATA_HOME then use $XDG_DATA_HOME/jellyfin
-            // ELSE    use $HOME/.local/share/jellyfin
-            var dataDir = options.DataDir;
+            _migrationLogger = StartupLogger.Logger.BeginGroup<JellyfinMigrationService>($"Migration Service");
+            var startupConfigurationManager = new ServerConfigurationManager(appPaths, _loggerFactory, new MyXmlSerializer());
+            startupConfigurationManager.AddParts([new DatabaseConfigurationFactory()]);
+            var migrationStartupServiceProvider = new ServiceCollection()
+                .AddLogging(d => d.AddSerilog())
+                .AddJellyfinDbContext(startupConfigurationManager, startupConfig)
+                .AddSingleton<IApplicationPaths>(appPaths)
+                .AddSingleton<ServerApplicationPaths>(appPaths)
+                .RegisterStartupLogger();
 
-            if (string.IsNullOrEmpty(dataDir))
-            {
-                dataDir = Environment.GetEnvironmentVariable("JELLYFIN_DATA_PATH");
+            var startupService = migrationStartupServiceProvider.BuildServiceProvider();
 
-                if (string.IsNullOrEmpty(dataDir))
-                {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        dataDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                    }
-                    else
-                    {
-                        // $XDG_DATA_HOME defines the base directory relative to which user specific data files should be stored.
-                        dataDir = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+            PrepareDatabaseProvider(startupService);
 
-                        // If $XDG_DATA_HOME is either not set or empty, a default equal to $HOME/.local/share should be used.
-                        if (string.IsNullOrEmpty(dataDir))
-                        {
-                            dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-                        }
-                    }
-
-                    dataDir = Path.Combine(dataDir, "jellyfin");
-                }
-            }
-
-            // configDir
-            // IF      --configdir
-            // ELSE IF $JELLYFIN_CONFIG_DIR
-            // ELSE IF --datadir, use <datadir>/config (assume portable run)
-            // ELSE IF <datadir>/config exists, use that
-            // ELSE IF windows, use <datadir>/config
-            // ELSE IF $XDG_CONFIG_HOME use $XDG_CONFIG_HOME/jellyfin
-            // ELSE    $HOME/.config/jellyfin
-            var configDir = options.ConfigDir;
-
-            if (string.IsNullOrEmpty(configDir))
-            {
-                configDir = Environment.GetEnvironmentVariable("JELLYFIN_CONFIG_DIR");
-
-                if (string.IsNullOrEmpty(configDir))
-                {
-                    if (options.DataDir != null || Directory.Exists(Path.Combine(dataDir, "config")) || RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        // Hang config folder off already set dataDir
-                        configDir = Path.Combine(dataDir, "config");
-                    }
-                    else
-                    {
-                        // $XDG_CONFIG_HOME defines the base directory relative to which user specific configuration files should be stored.
-                        configDir = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
-
-                        // If $XDG_CONFIG_HOME is either not set or empty, a default equal to $HOME /.config should be used.
-                        if (string.IsNullOrEmpty(configDir))
-                        {
-                            configDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
-                        }
-
-                        configDir = Path.Combine(configDir, "jellyfin");
-                    }
-                }
-            }
-
-            // cacheDir
-            // IF      --cachedir
-            // ELSE IF $JELLYFIN_CACHE_DIR
-            // ELSE IF windows, use <datadir>/cache
-            // ELSE IF XDG_CACHE_HOME, use $XDG_CACHE_HOME/jellyfin
-            // ELSE    HOME/.cache/jellyfin
-            var cacheDir = options.CacheDir;
-
-            if (string.IsNullOrEmpty(cacheDir))
-            {
-                cacheDir = Environment.GetEnvironmentVariable("JELLYFIN_CACHE_DIR");
-
-                if (string.IsNullOrEmpty(cacheDir))
-                {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        // Hang cache folder off already set dataDir
-                        cacheDir = Path.Combine(dataDir, "cache");
-                    }
-                    else
-                    {
-                        // $XDG_CACHE_HOME defines the base directory relative to which user specific non-essential data files should be stored.
-                        cacheDir = Environment.GetEnvironmentVariable("XDG_CACHE_HOME");
-
-                        // If $XDG_CACHE_HOME is either not set or empty, a default equal to $HOME/.cache should be used.
-                        if (string.IsNullOrEmpty(cacheDir))
-                        {
-                            cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache");
-                        }
-
-                        cacheDir = Path.Combine(cacheDir, "jellyfin");
-                    }
-                }
-            }
-
-            // logDir
-            // IF      --logdir
-            // ELSE IF $JELLYFIN_LOG_DIR
-            // ELSE IF --datadir, use <datadir>/log (assume portable run)
-            // ELSE    <datadir>/log
-            var logDir = options.LogDir;
-
-            if (string.IsNullOrEmpty(logDir))
-            {
-                logDir = Environment.GetEnvironmentVariable("JELLYFIN_LOG_DIR");
-
-                if (string.IsNullOrEmpty(logDir))
-                {
-                    // Hang log folder off already set dataDir
-                    logDir = Path.Combine(dataDir, "log");
-                }
-            }
-
-            // Ensure the main folders exist before we continue
-            try
-            {
-                Directory.CreateDirectory(dataDir);
-                Directory.CreateDirectory(logDir);
-                Directory.CreateDirectory(configDir);
-                Directory.CreateDirectory(cacheDir);
-            }
-            catch (IOException ex)
-            {
-                Console.Error.WriteLine("Error whilst attempting to create folder");
-                Console.Error.WriteLine(ex.ToString());
-                Environment.Exit(1);
-            }
-
-            return new ServerApplicationPaths(dataDir, logDir, configDir, cacheDir);
+            var jellyfinMigrationService = ActivatorUtilities.CreateInstance<JellyfinMigrationService>(startupService);
+            await jellyfinMigrationService.CheckFirstTimeRunOrMigration(appPaths, startupOptions).ConfigureAwait(false);
+            _optimizeDatabaseAfterMigration |= await jellyfinMigrationService.MigrateStepAsync(Migrations.Stages.JellyfinMigrationStageTypes.PreInitialisation, startupService).ConfigureAwait(false);
         }
 
-        private static async Task CreateLogger(IApplicationPaths appPaths)
+        /// <summary>
+        /// [Internal]Runs the Jellyfin migrator service with the Core stage.
+        /// </summary>
+        /// <remarks>
+        /// Not intended to be used other then by jellyfin and its tests.
+        /// </remarks>
+        /// <param name="serviceProvider">The service provider.</param>
+        /// <param name="jellyfinMigrationStage">The stage to run.</param>
+        /// <returns>A task.</returns>
+        public static async Task ApplyCoreMigrationsAsync(IServiceProvider serviceProvider, Migrations.Stages.JellyfinMigrationStageTypes jellyfinMigrationStage)
         {
+            var jellyfinMigrationService = ActivatorUtilities.CreateInstance<JellyfinMigrationService>(serviceProvider, _migrationLogger!);
+            _optimizeDatabaseAfterMigration |= await jellyfinMigrationService.MigrateStepAsync(jellyfinMigrationStage, serviceProvider).ConfigureAwait(false);
+        }
+
+        private static async Task OptimizeDatabaseAfterMigrationAsync(IServiceProvider serviceProvider)
+        {
+            if (!_optimizeDatabaseAfterMigration)
+            {
+                return;
+            }
+
+            // Reset first: a restart runs no migrations and must not optimize again.
+            _optimizeDatabaseAfterMigration = false;
+            SetupServer.ReportActivity(StartupActivity.OptimizingDatabase);
+            _logger.LogInformation("Migrations have been applied, optimizing the database... This might take a while");
+
             try
             {
-                string configPath = Path.Combine(appPaths.ConfigurationDirectoryPath, "logging.json");
-
-                if (!File.Exists(configPath))
-                {
-                    // For some reason the csproj name is used instead of the assembly name
-                    using (Stream rscstr = typeof(Program).Assembly
-                        .GetManifestResourceStream("Jellyfin.Server.Resources.Configuration.logging.json"))
-                    using (Stream fstr = File.Open(configPath, FileMode.CreateNew))
-                    {
-                        await rscstr.CopyToAsync(fstr).ConfigureAwait(false);
-                    }
-                }
-
-                var configuration = new ConfigurationBuilder()
-                    .SetBasePath(appPaths.ConfigurationDirectoryPath)
-                    .AddJsonFile("logging.json")
-                    .AddEnvironmentVariables("JELLYFIN_")
-                    .Build();
-
-                // Serilog.Log is used by SerilogLoggerFactory when no logger is specified
-                Serilog.Log.Logger = new LoggerConfiguration()
-                    .ReadFrom.Configuration(configuration)
-                    .Enrich.FromLogContext()
-                    .CreateLogger();
+                // Deliberately untimed: incomplete statistics are worse than a slow start.
+                var databaseProvider = serviceProvider.GetRequiredService<IJellyfinDatabaseProvider>();
+                await databaseProvider.RunScheduledOptimisation(CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                Serilog.Log.Logger = new LoggerConfiguration()
-                    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss}] [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-                    .WriteTo.Async(x => x.File(
-                        Path.Combine(appPaths.LogDirectoryPath, "log_.log"),
-                        rollingInterval: RollingInterval.Day,
-                        outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message}{NewLine}{Exception}"))
-                    .Enrich.FromLogContext()
-                    .CreateLogger();
-
-                Serilog.Log.Logger.Fatal(ex, "Failed to create/read logger configuration");
+                // A missed optimization only costs performance, so never fail startup over this.
+                _logger.LogError(ex, "Error while optimizing the database after migration");
             }
         }
 
-        private static IImageEncoder GetImageEncoder(
-            IFileSystem fileSystem,
+        /// <summary>
+        /// Create the application configuration.
+        /// </summary>
+        /// <param name="commandLineOpts">The command line options passed to the program.</param>
+        /// <param name="appPaths">The application paths.</param>
+        /// <returns>The application configuration.</returns>
+        public static IConfiguration CreateAppConfiguration(StartupOptions commandLineOpts, IApplicationPaths appPaths)
+        {
+            return new ConfigurationBuilder()
+                .ConfigureAppConfiguration(commandLineOpts, appPaths)
+                .Build();
+        }
+
+        private static IConfigurationBuilder ConfigureAppConfiguration(
+            this IConfigurationBuilder config,
+            StartupOptions commandLineOpts,
             IApplicationPaths appPaths,
-            ILocalizationManager localizationManager)
+            IConfiguration? startupConfig = null)
         {
-            try
+            // Use the swagger API page as the default redirect path if not hosting the web client
+            var inMemoryDefaultConfig = ConfigurationOptions.DefaultConfiguration;
+            if (startupConfig is not null && !startupConfig.HostWebClient())
             {
-                return new SkiaEncoder(_loggerFactory, appPaths, fileSystem, localizationManager);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogInformation(ex, "Skia not available. Will fallback to NullIMageEncoder. {0}");
+                inMemoryDefaultConfig[DefaultRedirectKey] = "api-docs/swagger";
             }
 
-            return new NullImageEncoder();
+            return config
+                .SetBasePath(appPaths.ConfigurationDirectoryPath)
+                .AddInMemoryCollection(inMemoryDefaultConfig)
+                .AddJsonFile(LoggingConfigFileDefault, optional: false, reloadOnChange: true)
+                .AddJsonFile(LoggingConfigFileSystem, optional: true, reloadOnChange: true)
+                .AddEnvironmentVariables("JELLYFIN_")
+                .AddInMemoryCollection(commandLineOpts.ConvertToConfig());
         }
 
-        private static MediaBrowser.Model.System.OperatingSystem GetOperatingSystem()
+        private static void PrepareDatabaseProvider(IServiceProvider services)
         {
-            switch (Environment.OSVersion.Platform)
-            {
-                case PlatformID.MacOSX:
-                    return MediaBrowser.Model.System.OperatingSystem.OSX;
-                case PlatformID.Win32NT:
-                    return MediaBrowser.Model.System.OperatingSystem.Windows;
-                case PlatformID.Unix:
-                default:
-                    {
-                        string osDescription = RuntimeInformation.OSDescription;
-                        if (osDescription.Contains("linux", StringComparison.OrdinalIgnoreCase))
-                        {
-                            return MediaBrowser.Model.System.OperatingSystem.Linux;
-                        }
-                        else if (osDescription.Contains("darwin", StringComparison.OrdinalIgnoreCase))
-                        {
-                            return MediaBrowser.Model.System.OperatingSystem.OSX;
-                        }
-                        else if (osDescription.Contains("bsd", StringComparison.OrdinalIgnoreCase))
-                        {
-                            return MediaBrowser.Model.System.OperatingSystem.BSD;
-                        }
-
-                        throw new Exception($"Can't resolve OS with description: '{osDescription}'");
-                    }
-            }
-        }
-
-        private static void StartNewInstance(StartupOptions options)
-        {
-            _logger.LogInformation("Starting new instance");
-
-            string module = options.RestartPath;
-
-            if (string.IsNullOrWhiteSpace(module))
-            {
-                module = Environment.GetCommandLineArgs().First();
-            }
-
-            string commandLineArgsString;
-
-            if (options.RestartArgs != null)
-            {
-                commandLineArgsString = options.RestartArgs ?? string.Empty;
-            }
-            else
-            {
-                commandLineArgsString = string.Join(
-                    " ",
-                    Environment.GetCommandLineArgs().Skip(1).Select(NormalizeCommandLineArgument));
-            }
-
-            _logger.LogInformation("Executable: {0}", module);
-            _logger.LogInformation("Arguments: {0}", commandLineArgsString);
-
-            Process.Start(module, commandLineArgsString);
-        }
-
-        private static string NormalizeCommandLineArgument(string arg)
-        {
-            if (!arg.Contains(" ", StringComparison.OrdinalIgnoreCase))
-            {
-                return arg;
-            }
-
-            return "\"" + arg + "\"";
+            var factory = services.GetRequiredService<IDbContextFactory<JellyfinDbContext>>();
+            var provider = services.GetRequiredService<IJellyfinDatabaseProvider>();
+            provider.DbContextFactory = factory;
         }
     }
 }

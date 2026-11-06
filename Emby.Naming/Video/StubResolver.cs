@@ -1,36 +1,50 @@
 using System;
 using System.IO;
-using System.Linq;
 using Emby.Naming.Common;
+using Jellyfin.Extensions;
 
 namespace Emby.Naming.Video
 {
+    /// <summary>
+    /// Resolve if file is stub (.disc).
+    /// </summary>
     public static class StubResolver
     {
-        public static StubResult ResolveFile(string path, NamingOptions options)
+        /// <summary>
+        /// Tries to resolve if file is stub (.disc).
+        /// </summary>
+        /// <param name="path">Path to file.</param>
+        /// <param name="options">NamingOptions containing StubFileExtensions and StubTypes.</param>
+        /// <param name="stubType">Stub type.</param>
+        /// <returns>True if file is a stub.</returns>
+        public static bool TryResolveFile(string path, NamingOptions options, out string? stubType)
         {
-            var result = new StubResult();
-            var extension = Path.GetExtension(path) ?? string.Empty;
+            stubType = default;
 
-            if (options.StubFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(path))
             {
-                result.IsStub = true;
+                return false;
+            }
 
-                path = Path.GetFileNameWithoutExtension(path);
+            var extension = Path.GetExtension(path.AsSpan());
 
-                var token = (Path.GetExtension(path) ?? string.Empty).TrimStart('.');
+            if (!options.StubFileExtensions.Contains(extension, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
 
-                foreach (var rule in options.StubTypes)
+            var token = Path.GetExtension(Path.GetFileNameWithoutExtension(path.AsSpan())).TrimStart('.');
+
+            foreach (var rule in options.StubTypes)
+            {
+                if (token.Equals(rule.Token, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (string.Equals(rule.Token, token, StringComparison.OrdinalIgnoreCase))
-                    {
-                        result.StubType = rule.StubType;
-                        break;
-                    }
+                    stubType = rule.StubType;
+                    return true;
                 }
             }
 
-            return result;
+            return true;
         }
     }
 }

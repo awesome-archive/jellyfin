@@ -1,10 +1,12 @@
-using MediaBrowser.Controller.Entities;
+#nullable disable
+
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Library;
 
 namespace MediaBrowser.Controller.Sorting
 {
     /// <summary>
-    /// Represents a BaseItem comparer that requires a User to perform it's comparison
+    /// Represents a BaseItem comparer that requires a User to perform its comparison.
     /// </summary>
     public interface IUserBaseItemComparer : IBaseItemComparer
     {
@@ -24,6 +26,6 @@ namespace MediaBrowser.Controller.Sorting
         /// Gets or sets the user data repository.
         /// </summary>
         /// <value>The user data repository.</value>
-        IUserDataManager UserDataRepository { get; set; }
+        IUserDataManager UserDataManager { get; set; }
     }
 }

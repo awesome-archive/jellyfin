@@ -1,226 +1,216 @@
+#pragma warning disable CS1591
+#pragma warning disable CA5394
+
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
-using Emby.Naming.Audio;
+using BitFaster.Caching.Lru;
 using Emby.Naming.Common;
 using Emby.Naming.TV;
 using Emby.Naming.Video;
 using Emby.Server.Implementations.Library.Resolvers;
-using Emby.Server.Implementations.Library.Validators;
 using Emby.Server.Implementations.Playlists;
-using Emby.Server.Implementations.ScheduledTasks;
+using Emby.Server.Implementations.ScheduledTasks.Tasks;
+using Emby.Server.Implementations.Sorting;
+using Jellyfin.Data;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
-using MediaBrowser.Common.Progress;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
-using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Resolvers;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Extensions;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Library;
-using MediaBrowser.Model.Net;
 using MediaBrowser.Model.Querying;
 using MediaBrowser.Model.Tasks;
-using MediaBrowser.Providers.MediaInfo;
 using Microsoft.Extensions.Logging;
-using SortOrder = MediaBrowser.Model.Entities.SortOrder;
+using Episode = MediaBrowser.Controller.Entities.TV.Episode;
+using EpisodeInfo = Emby.Naming.TV.EpisodeInfo;
+using Genre = MediaBrowser.Controller.Entities.Genre;
+using Person = MediaBrowser.Controller.Entities.Person;
 using VideoResolver = Emby.Naming.Video.VideoResolver;
 
 namespace Emby.Server.Implementations.Library
 {
     /// <summary>
-    /// Class LibraryManager
+    /// Class LibraryManager.
     /// </summary>
     public class LibraryManager : ILibraryManager
     {
-        /// <summary>
-        /// Gets or sets the postscan tasks.
-        /// </summary>
-        /// <value>The postscan tasks.</value>
-        private ILibraryPostScanTask[] PostscanTasks { get; set; }
+        private const string ShortcutFileExtension = ".mblink";
 
-        /// <summary>
-        /// Gets the intro providers.
-        /// </summary>
-        /// <value>The intro providers.</value>
-        private IIntroProvider[] IntroProviders { get; set; }
-
-        /// <summary>
-        /// Gets the list of entity resolution ignore rules
-        /// </summary>
-        /// <value>The entity resolution ignore rules.</value>
-        private IResolverIgnoreRule[] EntityResolutionIgnoreRules { get; set; }
-
-        /// <summary>
-        /// Gets the list of currently registered entity resolvers
-        /// </summary>
-        /// <value>The entity resolvers enumerable.</value>
-        private IItemResolver[] EntityResolvers { get; set; }
-        private IMultiItemResolver[] MultiItemResolvers { get; set; }
-
-        /// <summary>
-        /// Gets or sets the comparers.
-        /// </summary>
-        /// <value>The comparers.</value>
-        private IBaseItemComparer[] Comparers { get; set; }
-
-        /// <summary>
-        /// Gets the active item repository
-        /// </summary>
-        /// <value>The item repository.</value>
-        public IItemRepository ItemRepository { get; set; }
-
-        /// <summary>
-        /// Occurs when [item added].
-        /// </summary>
-        public event EventHandler<ItemChangeEventArgs> ItemAdded;
-
-        /// <summary>
-        /// Occurs when [item updated].
-        /// </summary>
-        public event EventHandler<ItemChangeEventArgs> ItemUpdated;
-
-        /// <summary>
-        /// Occurs when [item removed].
-        /// </summary>
-        public event EventHandler<ItemChangeEventArgs> ItemRemoved;
-
-        /// <summary>
-        /// The _logger
-        /// </summary>
-        private readonly ILogger _logger;
-
-        /// <summary>
-        /// The _task manager
-        /// </summary>
+        private readonly ILogger<LibraryManager> _logger;
         private readonly ITaskManager _taskManager;
-
-        /// <summary>
-        /// The _user manager
-        /// </summary>
         private readonly IUserManager _userManager;
-
-        /// <summary>
-        /// The _user data repository
-        /// </summary>
-        private readonly IUserDataManager _userDataRepository;
-
-        /// <summary>
-        /// Gets or sets the configuration manager.
-        /// </summary>
-        /// <value>The configuration manager.</value>
-        private IServerConfigurationManager ConfigurationManager { get; set; }
-
-        private readonly Func<ILibraryMonitor> _libraryMonitorFactory;
-        private readonly Func<IProviderManager> _providerManagerFactory;
-        private readonly Func<IUserViewManager> _userviewManager;
-        public bool IsScanRunning { get; private set; }
-        private IServerApplicationHost _appHost;
-
-        /// <summary>
-        /// The _library items cache
-        /// </summary>
-        private readonly ConcurrentDictionary<Guid, BaseItem> _libraryItemsCache;
-        /// <summary>
-        /// Gets the library items cache.
-        /// </summary>
-        /// <value>The library items cache.</value>
-        private ConcurrentDictionary<Guid, BaseItem> LibraryItemsCache => _libraryItemsCache;
-
+        private readonly IUserDataManager _userDataManager;
+        private readonly IServerConfigurationManager _configurationManager;
+        private readonly Lazy<ILibraryMonitor> _libraryMonitorFactory;
+        private readonly Lazy<IProviderManager> _providerManagerFactory;
+        private readonly Lazy<IUserViewManager> _userViewManagerFactory;
+        private readonly IServerApplicationHost _appHost;
         private readonly IFileSystem _fileSystem;
+        private readonly IItemRepository _itemRepository;
+        private readonly IItemPersistenceService _persistenceService;
+        private readonly INextUpService _nextUpService;
+        private readonly IItemCountService _countService;
+        private readonly ILinkedChildrenService _linkedChildrenService;
+        private readonly IImageProcessor _imageProcessor;
+        private readonly NamingOptions _namingOptions;
+        private readonly IPeopleRepository _peopleRepository;
+        private readonly ExtraResolver _extraResolver;
+        private readonly IPathManager _pathManager;
+        private readonly ILocalizationManager _localization;
+        private readonly IDirectoryService _directoryService;
+        private readonly FastConcurrentLru<Guid, BaseItem> _cache;
+        private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
+        private readonly IMediaStreamRepository _mediaStreamRepository;
+        private readonly Lazy<IExternalDataManager> _externalDataManagerFactory;
+
+        /// <summary>
+        /// The _root folder sync lock.
+        /// </summary>
+        private readonly Lock _rootFolderSyncLock = new();
+        private readonly Lock _userRootFolderSyncLock = new();
+
+        private readonly TimeSpan _viewRefreshInterval = TimeSpan.FromHours(24);
+
+        /// <summary>
+        /// The _root folder.
+        /// </summary>
+        private volatile AggregateFolder? _rootFolder;
+        private volatile UserRootFolder? _userRootFolder;
+
+        private bool _wizardCompleted;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="LibraryManager" /> class.
         /// </summary>
-        /// <param name="logger">The logger.</param>
+        /// <param name="appHost">The application host.</param>
+        /// <param name="loggerFactory">The logger factory.</param>
         /// <param name="taskManager">The task manager.</param>
         /// <param name="userManager">The user manager.</param>
         /// <param name="configurationManager">The configuration manager.</param>
-        /// <param name="userDataRepository">The user data repository.</param>
+        /// <param name="userDataManager">The user data manager.</param>
+        /// <param name="libraryMonitorFactory">The library monitor.</param>
+        /// <param name="fileSystem">The file system.</param>
+        /// <param name="providerManagerFactory">The provider manager.</param>
+        /// <param name="userViewManagerFactory">The user view manager.</param>
+        /// <param name="itemRepository">The item repository.</param>
+        /// <param name="persistenceService">The item persistence service.</param>
+        /// <param name="nextUpService">The next up service.</param>
+        /// <param name="countService">The item count service.</param>
+        /// <param name="linkedChildrenService">The linked children service.</param>
+        /// <param name="imageProcessor">The image processor.</param>
+        /// <param name="namingOptions">The naming options.</param>
+        /// <param name="directoryService">The directory service.</param>
+        /// <param name="peopleRepository">The people repository.</param>
+        /// <param name="pathManager">The path manager.</param>
+        /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
+        /// <param name="localization">The localization manager.</param>
+        /// <param name="mediaStreamRepository">The media stream repository.</param>
+        /// <param name="externalDataManagerFactory">The external data manager (lazy, to break the DI cycle through ChapterManager).</param>
         public LibraryManager(
             IServerApplicationHost appHost,
             ILoggerFactory loggerFactory,
             ITaskManager taskManager,
             IUserManager userManager,
             IServerConfigurationManager configurationManager,
-            IUserDataManager userDataRepository,
-            Func<ILibraryMonitor> libraryMonitorFactory,
+            IUserDataManager userDataManager,
+            Lazy<ILibraryMonitor> libraryMonitorFactory,
             IFileSystem fileSystem,
-            Func<IProviderManager> providerManagerFactory,
-            Func<IUserViewManager> userviewManager)
+            Lazy<IProviderManager> providerManagerFactory,
+            Lazy<IUserViewManager> userViewManagerFactory,
+            IItemRepository itemRepository,
+            IItemPersistenceService persistenceService,
+            INextUpService nextUpService,
+            IItemCountService countService,
+            ILinkedChildrenService linkedChildrenService,
+            IImageProcessor imageProcessor,
+            NamingOptions namingOptions,
+            IDirectoryService directoryService,
+            IPeopleRepository peopleRepository,
+            IPathManager pathManager,
+            DotIgnoreIgnoreRule dotIgnoreIgnoreRule,
+            ILocalizationManager localization,
+            IMediaStreamRepository mediaStreamRepository,
+            Lazy<IExternalDataManager> externalDataManagerFactory)
         {
-            _logger = loggerFactory.CreateLogger(nameof(LibraryManager));
+            _appHost = appHost;
+            _logger = loggerFactory.CreateLogger<LibraryManager>();
             _taskManager = taskManager;
             _userManager = userManager;
-            ConfigurationManager = configurationManager;
-            _userDataRepository = userDataRepository;
+            _configurationManager = configurationManager;
+            _userDataManager = userDataManager;
             _libraryMonitorFactory = libraryMonitorFactory;
             _fileSystem = fileSystem;
             _providerManagerFactory = providerManagerFactory;
-            _userviewManager = userviewManager;
-            _appHost = appHost;
-            _libraryItemsCache = new ConcurrentDictionary<Guid, BaseItem>();
+            _userViewManagerFactory = userViewManagerFactory;
+            _itemRepository = itemRepository;
+            _persistenceService = persistenceService;
+            _nextUpService = nextUpService;
+            _countService = countService;
+            _linkedChildrenService = linkedChildrenService;
+            _imageProcessor = imageProcessor;
 
-            ConfigurationManager.ConfigurationUpdated += ConfigurationUpdated;
+            _cache = new FastConcurrentLru<Guid, BaseItem>(_configurationManager.Configuration.CacheSize);
 
-            RecordConfigurationValues(configurationManager.Configuration);
+            _namingOptions = namingOptions;
+            _peopleRepository = peopleRepository;
+            _pathManager = pathManager;
+            _dotIgnoreIgnoreRule = dotIgnoreIgnoreRule;
+            _localization = localization;
+            _directoryService = directoryService;
+            _extraResolver = new ExtraResolver(loggerFactory.CreateLogger<ExtraResolver>(), namingOptions, directoryService);
+
+            _configurationManager.ConfigurationUpdated += ConfigurationUpdated;
+
+            _mediaStreamRepository = mediaStreamRepository;
+            _externalDataManagerFactory = externalDataManagerFactory;
+
+            RecordConfigurationValues(_configurationManager.Configuration);
         }
 
         /// <summary>
-        /// Adds the parts.
+        /// Occurs when [item added].
         /// </summary>
-        /// <param name="rules">The rules.</param>
-        /// <param name="resolvers">The resolvers.</param>
-        /// <param name="introProviders">The intro providers.</param>
-        /// <param name="itemComparers">The item comparers.</param>
-        /// <param name="postscanTasks">The postscan tasks.</param>
-        public void AddParts(IEnumerable<IResolverIgnoreRule> rules,
-            IEnumerable<IItemResolver> resolvers,
-            IEnumerable<IIntroProvider> introProviders,
-            IEnumerable<IBaseItemComparer> itemComparers,
-            IEnumerable<ILibraryPostScanTask> postscanTasks)
-        {
-            EntityResolutionIgnoreRules = rules.ToArray();
-            EntityResolvers = resolvers.OrderBy(i => i.Priority).ToArray();
-            MultiItemResolvers = EntityResolvers.OfType<IMultiItemResolver>().ToArray();
-            IntroProviders = introProviders.ToArray();
-            Comparers = itemComparers.ToArray();
-
-            PostscanTasks = postscanTasks.OrderBy(i =>
-            {
-                var hasOrder = i as IHasOrder;
-
-                return hasOrder == null ? 0 : hasOrder.Order;
-
-            }).ToArray();
-        }
+        public event EventHandler<ItemChangeEventArgs>? ItemAdded;
 
         /// <summary>
-        /// The _root folder
+        /// Occurs when [item updated].
         /// </summary>
-        private volatile AggregateFolder _rootFolder;
+        public event EventHandler<ItemChangeEventArgs>? ItemUpdated;
+
         /// <summary>
-        /// The _root folder sync lock
+        /// Occurs when [item removed].
         /// </summary>
-        private readonly object _rootFolderSyncLock = new object();
+        public event EventHandler<ItemChangeEventArgs>? ItemRemoved;
+
         /// <summary>
         /// Gets the root folder.
         /// </summary>
@@ -229,21 +219,81 @@ namespace Emby.Server.Implementations.Library
         {
             get
             {
-                if (_rootFolder == null)
+                if (_rootFolder is null)
                 {
                     lock (_rootFolderSyncLock)
                     {
-                        if (_rootFolder == null)
-                        {
-                            _rootFolder = CreateRootFolder();
-                        }
+                        _rootFolder ??= CreateRootFolder();
                     }
                 }
+
                 return _rootFolder;
             }
         }
 
-        private bool _wizardCompleted;
+        private ILibraryMonitor LibraryMonitor => _libraryMonitorFactory.Value;
+
+        private IProviderManager ProviderManager => _providerManagerFactory.Value;
+
+        private IUserViewManager UserViewManager => _userViewManagerFactory.Value;
+
+        /// <summary>
+        /// Gets or sets the postscan tasks.
+        /// </summary>
+        /// <value>The postscan tasks.</value>
+        private ILibraryPostScanTask[] PostScanTasks { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the intro providers.
+        /// </summary>
+        /// <value>The intro providers.</value>
+        private IIntroProvider[] IntroProviders { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the list of entity resolution ignore rules.
+        /// </summary>
+        /// <value>The entity resolution ignore rules.</value>
+        private IResolverIgnoreRule[] EntityResolutionIgnoreRules { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the list of currently registered entity resolvers.
+        /// </summary>
+        /// <value>The entity resolvers enumerable.</value>
+        private IItemResolver[] EntityResolvers { get; set; } = [];
+
+        private IMultiItemResolver[] MultiItemResolvers { get; set; } = [];
+
+        /// <summary>
+        /// Gets or sets the comparers.
+        /// </summary>
+        /// <value>The comparers.</value>
+        private IBaseItemComparer[] Comparers { get; set; } = [];
+
+        public bool IsScanRunning { get; private set; }
+
+        /// <summary>
+        /// Adds the parts.
+        /// </summary>
+        /// <param name="rules">The rules.</param>
+        /// <param name="resolvers">The resolvers.</param>
+        /// <param name="introProviders">The intro providers.</param>
+        /// <param name="itemComparers">The item comparers.</param>
+        /// <param name="postScanTasks">The post scan tasks.</param>
+        public void AddParts(
+            IEnumerable<IResolverIgnoreRule> rules,
+            IEnumerable<IItemResolver> resolvers,
+            IEnumerable<IIntroProvider> introProviders,
+            IEnumerable<IBaseItemComparer> itemComparers,
+            IEnumerable<ILibraryPostScanTask> postScanTasks)
+        {
+            EntityResolutionIgnoreRules = rules.ToArray();
+            EntityResolvers = resolvers.OrderBy(i => i.Priority).ToArray();
+            MultiItemResolvers = EntityResolvers.OfType<IMultiItemResolver>().ToArray();
+            IntroProviders = introProviders.ToArray();
+            Comparers = itemComparers.ToArray();
+            PostScanTasks = postScanTasks.ToArray();
+        }
+
         /// <summary>
         /// Records the configuration values.
         /// </summary>
@@ -258,9 +308,9 @@ namespace Emby.Server.Implementations.Library
         /// </summary>
         /// <param name="sender">The sender.</param>
         /// <param name="e">The <see cref="EventArgs" /> instance containing the event data.</param>
-        void ConfigurationUpdated(object sender, EventArgs e)
+        private void ConfigurationUpdated(object? sender, EventArgs e)
         {
-            var config = ConfigurationManager.Configuration;
+            var config = _configurationManager.Configuration;
 
             var wizardChanged = config.IsStartupWizardCompleted != _wizardCompleted;
 
@@ -268,43 +318,30 @@ namespace Emby.Server.Implementations.Library
 
             if (wizardChanged)
             {
-                _taskManager.CancelIfRunningAndQueue<RefreshMediaLibraryTask>();
+                QueueLibraryScan();
             }
         }
 
         public void RegisterItem(BaseItem item)
         {
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(item));
-            }
+            ArgumentNullException.ThrowIfNull(item);
+
             if (item is IItemByName)
             {
-                if (!(item is MusicArtist))
+                if (item is not MusicArtist)
+                {
+                    return;
+                }
+            }
+            else if (!item.IsFolder)
+            {
+                if (item is not Video && item is not LiveTvChannel)
                 {
                     return;
                 }
             }
 
-            else if (item.IsFolder)
-            {
-                //if (!(item is ICollectionFolder) && !(item is UserView) && !(item is Channel) && !(item is AggregateFolder))
-                //{
-                //    if (item.SourceType != SourceType.Library)
-                //    {
-                //        return;
-                //    }
-                //}
-            }
-            else
-            {
-                if (!(item is Video) && !(item is LiveTvChannel))
-                {
-                    return;
-                }
-            }
-
-            LibraryItemsCache.AddOrUpdate(item.Id, item, delegate { return item; });
+            _cache.AddOrUpdate(item.Id, item);
         }
 
         public void DeleteItem(BaseItem item, DeleteOptions options)
@@ -314,22 +351,76 @@ namespace Emby.Server.Implementations.Library
 
         public void DeleteItem(BaseItem item, DeleteOptions options, bool notifyParentItem)
         {
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(item));
-            }
+            ArgumentNullException.ThrowIfNull(item);
 
             var parent = item.GetOwner() ?? item.GetParent();
 
             DeleteItem(item, options, parent, notifyParentItem);
         }
 
+        public void DeleteItemsUnsafeFast(IReadOnlyCollection<BaseItem> items, bool deleteSourceFiles = false)
+        {
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            var pathMaps = items.Select(e =>
+                (Item: e,
+                InternalPath: GetInternalMetadataPaths(e),
+                DeletePaths: deleteSourceFiles ? e.GetDeletePaths() : [])).ToArray();
+
+            foreach (var (item, internalPaths, pathsToDelete) in pathMaps)
+            {
+                foreach (var metadataPath in internalPaths)
+                {
+                    if (!Directory.Exists(metadataPath))
+                    {
+                        continue;
+                    }
+
+                    _logger.LogDebug(
+                        "Deleting metadata path, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                        item.GetType().Name,
+                        item.Name ?? "Unknown name",
+                        metadataPath,
+                        item.Id);
+
+                    try
+                    {
+                        Directory.Delete(metadataPath, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error deleting {MetadataPath}", metadataPath);
+                    }
+                }
+
+                foreach (var fileSystemInfo in pathsToDelete)
+                {
+                    DeleteItemPath(item, false, fileSystemInfo);
+                }
+            }
+
+            var externalDataManager = _externalDataManagerFactory.Value;
+            foreach (var (item, _, _) in pathMaps)
+            {
+                externalDataManager.DeleteExternalItemFiles(item);
+            }
+
+            _persistenceService.DeleteItem([.. pathMaps.Select(f => f.Item.Id)]);
+
+            // Evict the deleted items from the cache and announce each removal.
+            foreach (var (item, _, _) in pathMaps)
+            {
+                _cache.TryRemove(item.Id, out _);
+                ReportItemRemoved(item, item.GetOwner() ?? item.GetParent());
+            }
+        }
+
         public void DeleteItem(BaseItem item, DeleteOptions options, BaseItem parent, bool notifyParentItem)
         {
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(item));
-            }
+            ArgumentNullException.ThrowIfNull(item);
 
             if (item.SourceType == SourceType.Channel)
             {
@@ -337,20 +428,21 @@ namespace Emby.Server.Implementations.Library
                 {
                     try
                     {
-                        var task = BaseItem.ChannelManager.DeleteItem(item);
-                        Task.WaitAll(task);
+                        BaseItem.ChannelManager.DeleteItem(item).GetAwaiter().GetResult();
                     }
                     catch (ArgumentException)
                     {
                         // channel no longer installed
                     }
                 }
+
                 options.DeleteFileLocation = false;
             }
 
             if (item is LiveTvProgram)
             {
-                _logger.LogDebug("Deleting item, Type: {0}, Name: {1}, Path: {2}, Id: {3}",
+                _logger.LogDebug(
+                    "Removing item, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
                     item.GetType().Name,
                     item.Name ?? "Unknown name",
                     item.Path ?? string.Empty,
@@ -358,72 +450,144 @@ namespace Emby.Server.Implementations.Library
             }
             else
             {
-                _logger.LogInformation("Deleting item, Type: {0}, Name: {1}, Path: {2}, Id: {3}",
+                _logger.LogInformation(
+                    "Removing item, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
                     item.GetType().Name,
                     item.Name ?? "Unknown name",
                     item.Path ?? string.Empty,
                     item.Id);
             }
 
+            // If deleting a primary version video, clear PrimaryVersionId from alternate versions
+            // OwnerId check: items with OwnerId set are alternate versions or extras, not primaries
+            if (item is Video video && !video.PrimaryVersionId.HasValue && video.OwnerId.IsEmpty())
+            {
+                var localAlternateIds = GetLocalAlternateVersionIds(video).ToHashSet();
+                var allAlternateVersions = localAlternateIds
+                    .Concat(GetLinkedAlternateVersions(video).Select(v => v.Id))
+                    .Distinct()
+                    .Select(id => GetItemById(id))
+                    .OfType<Video>()
+                    .ToList();
+
+                // Partition alternates by whether their files still exist on disk
+                var alternateVersions = new List<Video>();
+                var missingAlternates = new List<Video>();
+                foreach (var alt in allAlternateVersions)
+                {
+                    if (!string.IsNullOrEmpty(alt.Path) && !_fileSystem.FileExists(alt.Path))
+                    {
+                        missingAlternates.Add(alt);
+                    }
+                    else
+                    {
+                        alternateVersions.Add(alt);
+                    }
+                }
+
+                // Delete alternates whose files no longer exist to avoid ghost items.
+                // Clear PrimaryVersionId first so DeleteItem doesn't try to update the primary being deleted.
+                foreach (var missing in missingAlternates)
+                {
+                    _logger.LogInformation(
+                        "Deleting missing alternate version {Name} ({Path})",
+                        missing.Name ?? "Unknown name",
+                        missing.Path ?? string.Empty);
+                    missing.SetPrimaryVersionId(null);
+                    missing.OwnerId = Guid.Empty;
+                    missing.LocalAlternateVersions = [];
+                    missing.LinkedAlternateVersions = [];
+                    DeleteItem(missing, new DeleteOptions { DeleteFileLocation = false }, false);
+                }
+
+                if (alternateVersions.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "Clearing PrimaryVersionId from {Count} alternate versions of {Name}",
+                        alternateVersions.Count,
+                        item.Name ?? "Unknown name");
+
+                    // Promote the first alternate version to be the new primary
+                    var newPrimary = alternateVersions[0];
+                    newPrimary.SetPrimaryVersionId(null);
+                    newPrimary.OwnerId = Guid.Empty;
+
+                    // Transfer alternate version arrays from old primary to new primary
+                    // so UpdateToRepositoryAsync creates correct LinkedChildren entries
+                    newPrimary.LocalAlternateVersions = video.LocalAlternateVersions
+                        .Where(p => !string.Equals(p, newPrimary.Path, StringComparison.OrdinalIgnoreCase))
+                        .ToArray();
+                    newPrimary.LinkedAlternateVersions = video.LinkedAlternateVersions
+                        .Where(lc => !lc.ItemId.HasValue || !lc.ItemId.Value.Equals(newPrimary.Id))
+                        .ToArray();
+
+                    newPrimary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
+
+                    // Re-route playlist/collection references from deleted primary to new primary
+                    RerouteLinkedChildReferencesAsync(video.Id, newPrimary.Id).GetAwaiter().GetResult();
+
+                    // Update remaining alternates to point to new primary
+                    foreach (var alternate in alternateVersions.Skip(1))
+                    {
+                        alternate.SetPrimaryVersionId(newPrimary.Id);
+                        // Only set OwnerId for local alternates; linked alternates are independent items
+                        alternate.OwnerId = localAlternateIds.Contains(alternate.Id) ? newPrimary.Id : Guid.Empty;
+                        alternate.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                }
+            }
+            else if (item is Video alternateVideo && alternateVideo.PrimaryVersionId.HasValue)
+            {
+                // If deleting an alternate version, re-route references to its primary
+                RerouteLinkedChildReferencesAsync(alternateVideo.Id, alternateVideo.PrimaryVersionId.Value).GetAwaiter().GetResult();
+
+                // Remove deleted alternate from primary's LinkedAlternateVersions
+                if (GetItemById(alternateVideo.PrimaryVersionId.Value) is Video primaryVideo)
+                {
+                    primaryVideo.LinkedAlternateVersions = primaryVideo.LinkedAlternateVersions
+                        .Where(lc => !lc.ItemId.HasValue || !lc.ItemId.Value.Equals(alternateVideo.Id))
+                        .ToArray();
+                    primaryVideo.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
+                }
+            }
+
             var children = item.IsFolder
-                ? ((Folder)item).GetRecursiveChildren(false).ToList()
-                : new List<BaseItem>();
+                ? ((Folder)item).GetRecursiveChildren(false)
+                : [];
 
             foreach (var metadataPath in GetMetadataPaths(item, children))
             {
-                _logger.LogDebug("Deleting path {0}", metadataPath);
+                if (!Directory.Exists(metadataPath))
+                {
+                    continue;
+                }
+
+                _logger.LogDebug(
+                    "Deleting metadata path, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                    item.GetType().Name,
+                    item.Name ?? "Unknown name",
+                    metadataPath,
+                    item.Id);
 
                 try
                 {
                     Directory.Delete(metadataPath, true);
                 }
-                catch (IOException)
-                {
-
-                }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error deleting {metadataPath}", metadataPath);
+                    _logger.LogError(ex, "Error deleting {MetadataPath}", metadataPath);
                 }
             }
 
-            if (options.DeleteFileLocation && item.IsFileProtocol)
+            if ((options.DeleteFileLocation && item.IsFileProtocol) || IsInternalItem(item))
             {
                 // Assume only the first is required
                 // Add this flag to GetDeletePaths if required in the future
                 var isRequiredForDelete = true;
 
-                foreach (var fileSystemInfo in item.GetDeletePaths().ToList())
+                foreach (var fileSystemInfo in item.GetDeletePaths())
                 {
-                    if (File.Exists(fileSystemInfo.FullName))
-                    {
-                        try
-                        {
-                            _logger.LogDebug("Deleting path {path}", fileSystemInfo.FullName);
-                            if (fileSystemInfo.IsDirectory)
-                            {
-                                Directory.Delete(fileSystemInfo.FullName, true);
-                            }
-                            else
-                            {
-                                File.Delete(fileSystemInfo.FullName);
-                            }
-                        }
-                        catch (IOException)
-                        {
-                            if (isRequiredForDelete)
-                            {
-                                throw;
-                            }
-                        }
-                        catch (UnauthorizedAccessException)
-                        {
-                            if (isRequiredForDelete)
-                            {
-                                throw;
-                            }
-                        }
-                    }
+                    DeleteItemPath(item, isRequiredForDelete, fileSystemInfo);
 
                     isRequiredForDelete = false;
                 }
@@ -431,25 +595,164 @@ namespace Emby.Server.Implementations.Library
 
             item.SetParent(null);
 
-            ItemRepository.DeleteItem(item.Id, CancellationToken.None);
+            var externalDataManager = _externalDataManagerFactory.Value;
+            externalDataManager.DeleteExternalItemFiles(item);
             foreach (var child in children)
             {
-                ItemRepository.DeleteItem(child.Id, CancellationToken.None);
+                externalDataManager.DeleteExternalItemFiles(child);
             }
 
-            _libraryItemsCache.TryRemove(item.Id, out BaseItem removed);
+            _persistenceService.DeleteItem([item.Id, .. children.Select(f => f.Id)]);
+            _cache.TryRemove(item.Id, out _);
+            foreach (var child in children)
+            {
+                _cache.TryRemove(child.Id, out _);
+            }
+
+            if (parent is Folder folder)
+            {
+                folder.Children = null;
+                folder.UserData = null;
+            }
+
+            // Announce the descendants before the item itself.
+            foreach (var child in children)
+            {
+                ReportItemRemoved(child, item);
+            }
 
             ReportItemRemoved(item, parent);
         }
 
-        private static IEnumerable<string> GetMetadataPaths(BaseItem item, IEnumerable<BaseItem> children)
+        private void DeleteItemPath(BaseItem item, bool isRequiredForDelete, FileSystemMetadata fileSystemInfo)
+        {
+            if (Directory.Exists(fileSystemInfo.FullName) || File.Exists(fileSystemInfo.FullName))
+            {
+                try
+                {
+                    _logger.LogInformation(
+                        "Deleting item path, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                        item.GetType().Name,
+                        item.Name ?? "Unknown name",
+                        fileSystemInfo.FullName,
+                        item.Id);
+
+                    if (fileSystemInfo.IsDirectory)
+                    {
+                        Directory.Delete(fileSystemInfo.FullName, true);
+                    }
+                    else
+                    {
+                        File.Delete(fileSystemInfo.FullName);
+                    }
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    _logger.LogInformation(
+                        "Directory not found, only removing from database, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                        item.GetType().Name,
+                        item.Name ?? "Unknown name",
+                        fileSystemInfo.FullName,
+                        item.Id);
+                }
+                catch (FileNotFoundException)
+                {
+                    _logger.LogInformation(
+                        "File not found, only removing from database, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                        item.GetType().Name,
+                        item.Name ?? "Unknown name",
+                        fileSystemInfo.FullName,
+                        item.Id);
+                }
+                catch (IOException)
+                {
+                    if (isRequiredForDelete)
+                    {
+                        throw;
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    if (isRequiredForDelete)
+                    {
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private bool IsInternalItem(BaseItem item)
+        {
+            if (!item.IsFileProtocol)
+            {
+                return false;
+            }
+
+            var pathToCheck = item switch
+            {
+                Genre => _configurationManager.ApplicationPaths.GenrePath,
+                MusicArtist => _configurationManager.ApplicationPaths.ArtistsPath,
+                MusicGenre => _configurationManager.ApplicationPaths.MusicGenrePath,
+                Person => _configurationManager.ApplicationPaths.PeoplePath,
+                Studio => _configurationManager.ApplicationPaths.StudioPath,
+                Year => _configurationManager.ApplicationPaths.YearPath,
+                _ => null
+            };
+
+            var itemPath = item.Path;
+            if (!string.IsNullOrEmpty(pathToCheck) && !string.IsNullOrEmpty(itemPath))
+            {
+                var cleanPath = _fileSystem.GetValidFilename(itemPath);
+                var cleanCheckPath = _fileSystem.GetValidFilename(pathToCheck);
+
+                return cleanPath.StartsWith(cleanCheckPath, StringComparison.Ordinal);
+            }
+
+            return false;
+        }
+
+        private List<string> GetMetadataPaths(BaseItem item, IEnumerable<BaseItem> children)
+        {
+            var list = GetInternalMetadataPaths(item);
+            foreach (var child in children)
+            {
+                list.AddRange(GetInternalMetadataPaths(child));
+            }
+
+            return list;
+        }
+
+        private List<string> GetInternalMetadataPaths(BaseItem item)
         {
             var list = new List<string>
             {
                 item.GetInternalMetadataPath()
             };
 
-            list.AddRange(children.Select(i => i.GetInternalMetadataPath()));
+            if (item is Video video)
+            {
+                // Trickplay
+                list.Add(_pathManager.GetTrickplayDirectory(video));
+
+                // Chapter Images
+                list.Add(_pathManager.GetChapterImageFolderPath(video));
+
+                // Subtitles and attachments
+                foreach (var mediaSource in item.GetMediaSources(false))
+                {
+                    var subtitleFolder = _pathManager.GetSubtitleFolderPath(mediaSource.Id);
+                    if (subtitleFolder is not null)
+                    {
+                        list.Add(subtitleFolder);
+                    }
+
+                    var attachmentFolder = _pathManager.GetAttachmentFolderPath(mediaSource.Id);
+                    if (attachmentFolder is not null)
+                    {
+                        list.Add(attachmentFolder);
+                    }
+                }
+            }
 
             return list;
         }
@@ -460,12 +763,12 @@ namespace Emby.Server.Implementations.Library
         /// <param name="args">The args.</param>
         /// <param name="resolvers">The resolvers.</param>
         /// <returns>BaseItem.</returns>
-        private BaseItem ResolveItem(ItemResolveArgs args, IItemResolver[] resolvers)
+        private BaseItem? ResolveItem(ItemResolveArgs args, IItemResolver[]? resolvers)
         {
             var item = (resolvers ?? EntityResolvers).Select(r => Resolve(args, r))
-                .FirstOrDefault(i => i != null);
+                .FirstOrDefault(i => i is not null);
 
-            if (item != null)
+            if (item is not null)
             {
                 ResolverHelper.SetInitialItemValues(item, args, _fileSystem, this);
             }
@@ -473,7 +776,7 @@ namespace Emby.Server.Implementations.Library
             return item;
         }
 
-        private BaseItem Resolve(ItemResolveArgs args, IItemResolver resolver)
+        private BaseItem? Resolve(ItemResolveArgs args, IItemResolver resolver)
         {
             try
             {
@@ -481,7 +784,7 @@ namespace Emby.Server.Implementations.Library
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error in {resolver} resolving {path}", resolver.GetType().Name, args.Path);
+                _logger.LogError(ex, "Error in {Resolver} resolving {Path}", resolver.GetType().Name, args.Path);
                 return null;
             }
         }
@@ -493,24 +796,19 @@ namespace Emby.Server.Implementations.Library
 
         private Guid GetNewItemIdInternal(string key, Type type, bool forceCaseInsensitive)
         {
-            if (string.IsNullOrEmpty(key))
-            {
-                throw new ArgumentNullException(nameof(key));
-            }
-            if (type == null)
-            {
-                throw new ArgumentNullException(nameof(type));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(key);
+            ArgumentNullException.ThrowIfNull(type);
 
-            if (key.StartsWith(ConfigurationManager.ApplicationPaths.ProgramDataPath))
+            string programDataPath = _configurationManager.ApplicationPaths.ProgramDataPath;
+            if (key.StartsWith(programDataPath, StringComparison.Ordinal))
             {
                 // Try to normalize paths located underneath program-data in an attempt to make them more portable
-                key = key.Substring(ConfigurationManager.ApplicationPaths.ProgramDataPath.Length)
-                    .TrimStart(new[] { '/', '\\' })
-                    .Replace("/", "\\");
+                key = key.Substring(programDataPath.Length)
+                    .TrimStart('/', '\\')
+                    .Replace('/', '\\');
             }
 
-            if (forceCaseInsensitive || !ConfigurationManager.Configuration.EnableCaseSensitiveItemIds)
+            if (forceCaseInsensitive || !_configurationManager.Configuration.EnableCaseSensitiveItemIds)
             {
                 key = key.ToLowerInvariant();
             }
@@ -520,35 +818,131 @@ namespace Emby.Server.Implementations.Library
             return key.GetMD5();
         }
 
-        public BaseItem ResolvePath(FileSystemMetadata fileInfo,
-            Folder parent = null)
+        public BaseItem? ResolvePath(
+            FileSystemMetadata fileInfo,
+            Folder? parent = null,
+            IDirectoryService? directoryService = null,
+            CollectionType? collectionType = null)
+            => ResolvePath(fileInfo, directoryService ?? new DirectoryService(_fileSystem), null, parent, collectionType);
+
+        private void SetAdditionalPartsFromStack(Video altVideo, string path)
         {
-            return ResolvePath(fileInfo, new DirectoryService(_logger, _fileSystem), null, parent);
+            if (altVideo.AdditionalParts is { Length: > 0 })
+            {
+                return;
+            }
+
+            var directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(directory))
+            {
+                return;
+            }
+
+            IEnumerable<FileSystemMetadata> siblings;
+            try
+            {
+                siblings = _fileSystem.GetFiles(directory);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to enumerate siblings to detect stack for {Path}", path);
+                return;
+            }
+
+            var stacks = StackResolver.Resolve(siblings, _namingOptions);
+            foreach (var stack in stacks)
+            {
+                if (stack.Files.Count > 1
+                    && string.Equals(stack.Files[0], path, StringComparison.OrdinalIgnoreCase))
+                {
+                    altVideo.AdditionalParts = stack.Files.Skip(1).ToArray();
+                    return;
+                }
+            }
         }
 
-        private BaseItem ResolvePath(FileSystemMetadata fileInfo,
-            IDirectoryService directoryService,
-            IItemResolver[] resolvers,
-            Folder parent = null,
-            string collectionType = null,
-            LibraryOptions libraryOptions = null)
+        /// <inheritdoc />
+        public Video? ResolveAlternateVersion(string path, Type expectedVideoType, Folder? parent, CollectionType? collectionType)
         {
-            if (fileInfo == null)
+            // Clean up any existing item saved with wrong type (e.g. Video instead of Movie).
+            // This happens when items were previously resolved without proper type context
+            // in mixed-content libraries where collectionType is null.
+            var expectedId = GetNewItemId(path, expectedVideoType);
+            if (expectedVideoType != typeof(Video))
             {
-                throw new ArgumentNullException(nameof(fileInfo));
+                var wrongTypeId = GetNewItemId(path, typeof(Video));
+                if (!wrongTypeId.Equals(expectedId) && GetItemById(wrongTypeId) is Video wrongTypeItem)
+                {
+                    _logger.LogInformation(
+                        "Removing alternate version with wrong type {WrongType}, expected {ExpectedType}: {Path}",
+                        wrongTypeItem.GetType().Name,
+                        expectedVideoType.Name,
+                        path);
+
+                    // A full DeleteItem would save the primary version, which resolves its
+                    // alternates again and re-enters here before this row is gone.
+                    DeleteItemsUnsafeFast([wrongTypeItem]);
+
+                    // The fast path skips the parent bookkeeping, and the stale item is listed
+                    // under its ParentId, so that folder's cached listing has to be dropped.
+                    if (wrongTypeItem.GetParent() is Folder staleParent)
+                    {
+                        staleParent.Children = null;
+                        staleParent.UserData = null;
+                    }
+                }
             }
+
+            var resolved = ResolvePath(
+                _fileSystem.GetFileSystemInfo(path),
+                parent,
+                collectionType: collectionType) as Video;
+
+            if (resolved is null)
+            {
+                return null;
+            }
+
+            // Ensure the alternate version has the same concrete type as the primary video.
+            // ResolvePath may return a generic Video for files in mixed-content libraries
+            // where collectionType is null, even though the primary is a Movie/Episode/etc.
+            if (resolved.GetType() != expectedVideoType)
+            {
+                if (Activator.CreateInstance(expectedVideoType) is Video correctVideo)
+                {
+                    correctVideo.Path = resolved.Path;
+                    correctVideo.Name = resolved.Name;
+                    correctVideo.VideoType = resolved.VideoType;
+                    correctVideo.ProductionYear = resolved.ProductionYear;
+                    correctVideo.ExtraType = resolved.ExtraType;
+                    resolved = correctVideo;
+                }
+            }
+
+            resolved.Id = expectedId;
+            return resolved;
+        }
+
+        private BaseItem? ResolvePath(
+            FileSystemMetadata fileInfo,
+            IDirectoryService directoryService,
+            IItemResolver[]? resolvers,
+            Folder? parent = null,
+            CollectionType? collectionType = null,
+            LibraryOptions? libraryOptions = null)
+        {
+            ArgumentNullException.ThrowIfNull(fileInfo);
 
             var fullPath = fileInfo.FullName;
 
-            if (string.IsNullOrEmpty(collectionType) && parent != null)
+            if (collectionType is null && parent is not null)
             {
                 collectionType = GetContentTypeOverride(fullPath, true);
             }
 
-            var args = new ItemResolveArgs(ConfigurationManager.ApplicationPaths, directoryService)
+            var args = new ItemResolveArgs(_configurationManager.ApplicationPaths, this)
             {
                 Parent = parent,
-                Path = fullPath,
                 FileInfo = fileInfo,
                 CollectionType = collectionType,
                 LibraryOptions = libraryOptions
@@ -577,11 +971,11 @@ namespace Emby.Server.Implementations.Library
                 }
                 catch (Exception ex)
                 {
-                    if (parent != null && parent.IsPhysicalRoot)
+                    if (parent is not null && parent.IsPhysicalRoot)
                     {
                         _logger.LogError(ex, "Error in GetFilteredFileSystemEntries isPhysicalRoot: {0} IsVf: {1}", isPhysicalRoot, isVf);
 
-                        files = new FileSystemMetadata[] { };
+                        files = [];
                     }
                     else
                     {
@@ -589,7 +983,7 @@ namespace Emby.Server.Implementations.Library
                     }
                 }
 
-                // Need to remove subpaths that may have been resolved from shortcuts
+                // Need to remove sub-paths that may have been resolved from shortcuts
                 // Example: if \\server\movies exists, then strip out \\server\movies\action
                 if (isPhysicalRoot)
                 {
@@ -599,34 +993,29 @@ namespace Emby.Server.Implementations.Library
                 args.FileSystemChildren = files;
             }
 
-            // Check to see if we should resolve based on our contents
-            if (args.IsDirectory && !ShouldResolvePathContents(args))
+            // Filter content based on ignore rules
+            if (args.IsDirectory)
             {
-                return null;
+                var filtered = args.GetActualFileSystemChildren().ToArray();
+                args.FileSystemChildren = filtered ?? [];
             }
 
             return ResolveItem(args, resolvers);
         }
 
-        public bool IgnoreFile(FileSystemMetadata file, BaseItem parent)
-        {
-            if (EntityResolutionIgnoreRules.Any(r => r.ShouldIgnore(file, parent)))
-            {
-                return true;
-            }
-            return false;
-        }
+        public bool IgnoreFile(FileSystemMetadata file, BaseItem? parent)
+            => EntityResolutionIgnoreRules.Any(r => r.ShouldIgnore(file, parent));
 
         public List<FileSystemMetadata> NormalizeRootPathList(IEnumerable<FileSystemMetadata> paths)
         {
             var originalList = paths.ToList();
 
             var list = originalList.Where(i => i.IsDirectory)
-                .Select(i => _fileSystem.NormalizePath(i.FullName))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(i => Path.TrimEndingDirectorySeparator(i.FullName))
+                .Distinct()
                 .ToList();
 
-            var dupes = list.Where(subPath => !subPath.EndsWith(":\\", StringComparison.OrdinalIgnoreCase) && list.Any(i => _fileSystem.ContainsSubPath(i, subPath)))
+            var dupes = list.Where(subPath => !subPath.EndsWith(":\\", StringComparison.Ordinal) && list.Any(i => _fileSystem.ContainsSubPath(i, subPath)))
                 .ToList();
 
             foreach (var dupe in dupes)
@@ -634,53 +1023,38 @@ namespace Emby.Server.Implementations.Library
                 _logger.LogInformation("Found duplicate path: {0}", dupe);
             }
 
-            var newList = list.Except(dupes, StringComparer.OrdinalIgnoreCase).Select(_fileSystem.GetDirectoryInfo).ToList();
+            var newList = list.Except(dupes, StringComparer.Ordinal).Select(_fileSystem.GetDirectoryInfo).ToList();
             newList.AddRange(originalList.Where(i => !i.IsDirectory));
             return newList;
         }
 
-        /// <summary>
-        /// Determines whether a path should be ignored based on its contents - called after the contents have been read
-        /// </summary>
-        /// <param name="args">The args.</param>
-        /// <returns><c>true</c> if XXXX, <c>false</c> otherwise</returns>
-        private static bool ShouldResolvePathContents(ItemResolveArgs args)
-        {
-            // Ignore any folders containing a file called .ignore
-            return !args.ContainsFileSystemEntryByName(".ignore");
-        }
-
-        public IEnumerable<BaseItem> ResolvePaths(IEnumerable<FileSystemMetadata> files, IDirectoryService directoryService, Folder parent, LibraryOptions libraryOptions, string collectionType)
+        public IEnumerable<BaseItem> ResolvePaths(IEnumerable<FileSystemMetadata> files, IDirectoryService directoryService, Folder parent, LibraryOptions libraryOptions, CollectionType? collectionType = null)
         {
             return ResolvePaths(files, directoryService, parent, libraryOptions, collectionType, EntityResolvers);
         }
 
-        public IEnumerable<BaseItem> ResolvePaths(IEnumerable<FileSystemMetadata> files,
+        public IEnumerable<BaseItem> ResolvePaths(
+            IEnumerable<FileSystemMetadata> files,
             IDirectoryService directoryService,
             Folder parent,
             LibraryOptions libraryOptions,
-            string collectionType,
+            CollectionType? collectionType,
             IItemResolver[] resolvers)
         {
             var fileList = files.Where(i => !IgnoreFile(i, parent)).ToList();
 
-            if (parent != null)
+            if (parent is not null)
             {
-                var multiItemResolvers = resolvers == null ? MultiItemResolvers : resolvers.OfType<IMultiItemResolver>().ToArray();
+                var multiItemResolvers = resolvers is null ? MultiItemResolvers : resolvers.OfType<IMultiItemResolver>();
 
                 foreach (var resolver in multiItemResolvers)
                 {
                     var result = resolver.ResolveMultiple(parent, fileList, collectionType, directoryService);
 
-                    if (result != null && result.Items.Count > 0)
+                    if (result?.Items.Count > 0)
                     {
-                        var items = new List<BaseItem>();
-                        items.AddRange(result.Items);
-
-                        foreach (var item in items)
-                        {
-                            ResolverHelper.SetInitialItemValues(item, parent, _fileSystem, this, directoryService);
-                        }
+                        var items = result.Items;
+                        items.RemoveAll(item => !ResolverHelper.SetInitialItemValues(item, parent, this, directoryService));
                         items.AddRange(ResolveFileList(result.ExtraFiles, directoryService, parent, collectionType, resolvers, libraryOptions));
                         return items;
                     }
@@ -690,39 +1064,47 @@ namespace Emby.Server.Implementations.Library
             return ResolveFileList(fileList, directoryService, parent, collectionType, resolvers, libraryOptions);
         }
 
-        private IEnumerable<BaseItem> ResolveFileList(IEnumerable<FileSystemMetadata> fileList,
+        private IEnumerable<BaseItem> ResolveFileList(
+            IReadOnlyList<FileSystemMetadata> fileList,
             IDirectoryService directoryService,
-            Folder parent,
-            string collectionType,
-            IItemResolver[] resolvers,
+            Folder? parent,
+            CollectionType? collectionType,
+            IItemResolver[]? resolvers,
             LibraryOptions libraryOptions)
         {
-            return fileList.Select(f =>
+            // Given that fileList is a list we can save enumerator allocations by indexing
+            for (var i = 0; i < fileList.Count; i++)
             {
+                var file = fileList[i];
+                BaseItem? result = null;
                 try
                 {
-                    return ResolvePath(f, directoryService, resolvers, parent, collectionType, libraryOptions);
+                    result = ResolvePath(file, directoryService, resolvers, parent, collectionType, libraryOptions);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error resolving path {path}", f.FullName);
-                    return null;
+                    _logger.LogError(ex, "Error resolving path {Path}", file.FullName);
                 }
-            }).Where(i => i != null);
+
+                if (result is not null)
+                {
+                    yield return result;
+                }
+            }
         }
 
         /// <summary>
-        /// Creates the root media folder
+        /// Creates the root media folder.
         /// </summary>
         /// <returns>AggregateFolder.</returns>
-        /// <exception cref="InvalidOperationException">Cannot create the root folder until plugins have loaded</exception>
+        /// <exception cref="InvalidOperationException">Cannot create the root folder until plugins have loaded.</exception>
         public AggregateFolder CreateRootFolder()
         {
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.RootFolderPath;
+            var rootFolderPath = _configurationManager.ApplicationPaths.RootFolderPath;
 
-            Directory.CreateDirectory(rootFolderPath);
-
-            var rootFolder = GetItemById(GetNewItemId(rootFolderPath, typeof(AggregateFolder))) as AggregateFolder ?? ((Folder)ResolvePath(_fileSystem.GetDirectoryInfo(rootFolderPath))).DeepCopy<Folder, AggregateFolder>();
+            var rootFolder = GetItemById(GetNewItemId(rootFolderPath, typeof(AggregateFolder))) as AggregateFolder ??
+                             (ResolvePath(_fileSystem.GetDirectoryInfo(rootFolderPath)) as Folder ?? throw new InvalidOperationException("Something went very wong"))
+                             .DeepCopy<Folder, AggregateFolder>();
 
             // In case program data folder was moved
             if (!string.Equals(rootFolder.Path, rootFolderPath, StringComparison.Ordinal))
@@ -732,38 +1114,33 @@ namespace Emby.Server.Implementations.Library
             }
 
             // Add in the plug-in folders
-            var path = Path.Combine(ConfigurationManager.ApplicationPaths.DataPath, "playlists");
+            var path = Path.Combine(_configurationManager.ApplicationPaths.DataPath, "playlists");
 
-            Directory.CreateDirectory(path);
-
+            var info = Directory.CreateDirectory(path);
             Folder folder = new PlaylistsFolder
             {
-                Path = path
+                Path = path,
+                DateCreated = info.CreationTimeUtc,
+                DateModified = info.LastWriteTimeUtc,
             };
 
-            if (folder.Id.Equals(Guid.Empty))
+            if (folder.Id.IsEmpty())
             {
-                if (string.IsNullOrEmpty(folder.Path))
-                {
-                    folder.Id = GetNewItemId(folder.GetType().Name, folder.GetType());
-                }
-                else
-                {
-                    folder.Id = GetNewItemId(folder.Path, folder.GetType());
-                }
+                folder.Id = GetNewItemId(folder.Path, folder.GetType());
             }
 
             var dbItem = GetItemById(folder.Id) as BasePluginFolder;
 
-            if (dbItem != null && string.Equals(dbItem.Path, folder.Path, StringComparison.OrdinalIgnoreCase))
+            if (dbItem is not null && string.Equals(dbItem.Path, folder.Path, StringComparison.OrdinalIgnoreCase))
             {
                 folder = dbItem;
             }
 
-            if (folder.ParentId != rootFolder.Id)
+            if (!folder.ParentId.Equals(rootFolder.Id))
             {
+                rootFolder.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, CancellationToken.None).GetAwaiter().GetResult();
                 folder.ParentId = rootFolder.Id;
-                folder.UpdateToRepository(ItemUpdateType.MetadataImport, CancellationToken.None);
+                folder.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, CancellationToken.None).GetAwaiter().GetResult();
             }
 
             rootFolder.AddVirtualChild(folder);
@@ -773,25 +1150,35 @@ namespace Emby.Server.Implementations.Library
             return rootFolder;
         }
 
-        private volatile UserRootFolder _userRootFolder;
-        private readonly object _syncLock = new object();
         public Folder GetUserRootFolder()
         {
-            if (_userRootFolder == null)
+            if (_userRootFolder is null)
             {
-                lock (_syncLock)
+                lock (_userRootFolderSyncLock)
                 {
-                    if (_userRootFolder == null)
+                    if (_userRootFolder is null)
                     {
-                        var userRootPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
+                        var userRootPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
 
+                        _logger.LogDebug("Creating userRootPath at {Path}", userRootPath);
                         Directory.CreateDirectory(userRootPath);
 
-                        var tmpItem = GetItemById(GetNewItemId(userRootPath, typeof(UserRootFolder))) as UserRootFolder;
-
-                        if (tmpItem == null)
+                        var newItemId = GetNewItemId(userRootPath, typeof(UserRootFolder));
+                        UserRootFolder? tmpItem = null;
+                        try
                         {
-                            tmpItem = ((Folder)ResolvePath(_fileSystem.GetDirectoryInfo(userRootPath))).DeepCopy<Folder, UserRootFolder>();
+                            tmpItem = GetItemById(newItemId) as UserRootFolder;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error creating UserRootFolder {Path}", newItemId);
+                        }
+
+                        if (tmpItem is null)
+                        {
+                            _logger.LogDebug("Creating new userRootFolder with DeepCopy");
+                            tmpItem = (ResolvePath(_fileSystem.GetDirectoryInfo(userRootPath)) as Folder ?? throw new InvalidOperationException("Failed to get user root path"))
+                                        .DeepCopy<Folder, UserRootFolder>();
                         }
 
                         // In case program data folder was moved
@@ -802,6 +1189,7 @@ namespace Emby.Server.Implementations.Library
                         }
 
                         _userRootFolder = tmpItem;
+                        _logger.LogDebug("Setting userRootFolder: {Folder}", _userRootFolder);
                     }
                 }
             }
@@ -809,23 +1197,18 @@ namespace Emby.Server.Implementations.Library
             return _userRootFolder;
         }
 
-        public BaseItem FindByPath(string path, bool? isFolder)
+        /// <inheritdoc />
+        public BaseItem? FindByPath(string path, bool? isFolder)
         {
             // If this returns multiple items it could be tricky figuring out which one is correct.
             // In most cases, the newest one will be and the others obsolete but not yet cleaned up
-
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
-
-            //_logger.LogInformation("FindByPath {0}", path);
+            ArgumentException.ThrowIfNullOrEmpty(path);
 
             var query = new InternalItemsQuery
             {
                 Path = path,
                 IsFolder = isFolder,
-                OrderBy = new[] { ItemSortBy.DateCreated }.Select(i => new ValueTuple<string, SortOrder>(i, SortOrder.Descending)).ToArray(),
+                OrderBy = [(ItemSortBy.DateCreated, SortOrder.Descending)],
                 Limit = 1,
                 DtoOptions = new DtoOptions(true)
             };
@@ -834,18 +1217,54 @@ namespace Emby.Server.Implementations.Library
                 .FirstOrDefault();
         }
 
-        /// <summary>
-        /// Gets a Person
-        /// </summary>
-        /// <param name="name">The name.</param>
-        /// <returns>Task{Person}.</returns>
-        public Person GetPerson(string name)
+        /// <inheritdoc />
+        public Guid GetPersonId(string name)
         {
-            return CreateItemByName<Person>(Person.GetPath, name, new DtoOptions(true));
+            return GetItemByNameId<Person>(Person.GetPath(name));
+        }
+
+        /// <inheritdoc />
+        public Person? GetPerson(string name)
+        {
+            var path = Person.GetPath(name);
+            var id = GetItemByNameId<Person>(path);
+            if (GetItemById(id) is Person item)
+            {
+                return item;
+            }
+
+            return null;
+        }
+
+        /// <inheritdoc />
+        public Person GetOrCreatePerson(string name)
+        {
+            var existing = GetPerson(name);
+            if (existing is not null)
+            {
+                return existing;
+            }
+
+            var path = Person.GetPath(name);
+            var info = Directory.CreateDirectory(path);
+            var item = new Person
+            {
+                Name = name,
+                Id = GetItemByNameId<Person>(path),
+                DateCreated = info.CreationTimeUtc,
+                DateModified = info.LastWriteTimeUtc,
+                Path = path
+            };
+
+            item.PresentationUniqueKey = item.CreatePresentationUniqueKey();
+
+            CreateItem(item, null);
+
+            return item;
         }
 
         /// <summary>
-        /// Gets a Studio
+        /// Gets the studio.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>Task{Studio}.</returns>
@@ -856,21 +1275,21 @@ namespace Emby.Server.Implementations.Library
 
         public Guid GetStudioId(string name)
         {
-            return GetItemByNameId<Studio>(Studio.GetPath, name);
+            return GetItemByNameId<Studio>(Studio.GetPath(name));
         }
 
         public Guid GetGenreId(string name)
         {
-            return GetItemByNameId<Genre>(Genre.GetPath, name);
+            return GetItemByNameId<Genre>(Genre.GetPath(name));
         }
 
         public Guid GetMusicGenreId(string name)
         {
-            return GetItemByNameId<MusicGenre>(MusicGenre.GetPath, name);
+            return GetItemByNameId<MusicGenre>(MusicGenre.GetPath(name));
         }
 
         /// <summary>
-        /// Gets a Genre
+        /// Gets the genre.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>Task{Genre}.</returns>
@@ -880,7 +1299,7 @@ namespace Emby.Server.Implementations.Library
         }
 
         /// <summary>
-        /// Gets the genre.
+        /// Gets the music genre.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>Task{MusicGenre}.</returns>
@@ -890,11 +1309,10 @@ namespace Emby.Server.Implementations.Library
         }
 
         /// <summary>
-        /// Gets a Year
+        /// Gets the year.
         /// </summary>
         /// <param name="value">The value.</param>
         /// <returns>Task{Year}.</returns>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
         public Year GetYear(int value)
         {
             if (value <= 0)
@@ -908,13 +1326,18 @@ namespace Emby.Server.Implementations.Library
         }
 
         /// <summary>
-        /// Gets a Genre
+        /// Gets a Genre.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>Task{Genre}.</returns>
         public MusicArtist GetArtist(string name)
         {
             return GetArtist(name, new DtoOptions(true));
+        }
+
+        public IReadOnlyDictionary<string, MusicArtist[]> GetArtists(IReadOnlyList<string> names)
+        {
+            return _linkedChildrenService.FindArtists(names);
         }
 
         public MusicArtist GetArtist(string name, DtoOptions options)
@@ -929,34 +1352,32 @@ namespace Emby.Server.Implementations.Library
             {
                 var existing = GetItemList(new InternalItemsQuery
                 {
-                    IncludeItemTypes = new[] { typeof(T).Name },
+                    IncludeItemTypes = [BaseItemKind.MusicArtist],
                     Name = name,
                     DtoOptions = options
-
                 }).Cast<MusicArtist>()
                 .OrderBy(i => i.IsAccessedByName ? 1 : 0)
                 .Cast<T>()
                 .FirstOrDefault();
 
-                if (existing != null)
+                if (existing is not null)
                 {
                     return existing;
                 }
             }
 
-            var id = GetItemByNameId<T>(getPathFn, name);
-
+            var path = getPathFn(name);
+            var id = GetItemByNameId<T>(path);
             var item = GetItemById(id) as T;
-
-            if (item == null)
+            if (item is null)
             {
-                var path = getPathFn(name);
+                var info = Directory.CreateDirectory(path);
                 item = new T
                 {
                     Name = name,
                     Id = id,
-                    DateCreated = DateTime.UtcNow,
-                    DateModified = DateTime.UtcNow,
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc,
                     Path = path
                 };
 
@@ -966,31 +1387,15 @@ namespace Emby.Server.Implementations.Library
             return item;
         }
 
-        private Guid GetItemByNameId<T>(Func<string, string> getPathFn, string name)
+        private Guid GetItemByNameId<T>(string path)
               where T : BaseItem, new()
         {
-            var path = getPathFn(name);
-            var forceCaseInsensitiveId = ConfigurationManager.Configuration.EnableNormalizedItemByNameIds;
+            var forceCaseInsensitiveId = _configurationManager.Configuration.EnableNormalizedItemByNameIds;
             return GetNewItemIdInternal(path, typeof(T), forceCaseInsensitiveId);
         }
 
         /// <summary>
-        /// Validate and refresh the People sub-set of the IBN.
-        /// The items are stored in the db but not loaded into memory until actually requested by an operation.
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public Task ValidatePeople(CancellationToken cancellationToken, IProgress<double> progress)
-        {
-            // Ensure the location is available.
-            Directory.CreateDirectory(ConfigurationManager.ApplicationPaths.PeoplePath);
-
-            return new PeopleValidator(this, _logger, ConfigurationManager, _fileSystem).ValidatePeople(cancellationToken, progress);
-        }
-
-        /// <summary>
-        /// Reloads the root media folder
+        /// Reloads the root media folder.
         /// </summary>
         /// <param name="progress">The progress.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
@@ -1004,15 +1409,6 @@ namespace Emby.Server.Implementations.Library
         }
 
         /// <summary>
-        /// Queues the library scan.
-        /// </summary>
-        public void QueueLibraryScan()
-        {
-            // Just run the scheduled task so that the user can see it
-            _taskManager.QueueScheduledTask<RefreshMediaLibraryTask>();
-        }
-
-        /// <summary>
         /// Validates the media library internal.
         /// </summary>
         /// <param name="progress">The progress.</param>
@@ -1021,7 +1417,8 @@ namespace Emby.Server.Implementations.Library
         public async Task ValidateMediaLibraryInternal(IProgress<double> progress, CancellationToken cancellationToken)
         {
             IsScanRunning = true;
-            _libraryMonitorFactory().Stop();
+            ClearIgnoreRuleCache();
+            LibraryMonitor.Stop();
 
             try
             {
@@ -1029,30 +1426,65 @@ namespace Emby.Server.Implementations.Library
             }
             finally
             {
-                _libraryMonitorFactory().Start();
+                ClearIgnoreRuleCache();
+                LibraryMonitor.Start();
                 IsScanRunning = false;
             }
         }
 
-        private async Task ValidateTopLibraryFolders(CancellationToken cancellationToken)
+        public async Task ValidateTopLibraryFolders(CancellationToken cancellationToken, bool removeRoot = false)
         {
-            var rootChildren = RootFolder.Children.ToList();
-            rootChildren = GetUserRootFolder().Children.ToList();
-
+            ClearIgnoreRuleCache();
+            RootFolder.Children = null;
             await RootFolder.RefreshMetadata(cancellationToken).ConfigureAwait(false);
 
             // Start by just validating the children of the root, but go no further
-            await RootFolder.ValidateChildren(new SimpleProgress<double>(), cancellationToken, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem)), recursive: false);
+            await RootFolder.ValidateChildren(
+                new Progress<double>(),
+                new MetadataRefreshOptions(new DirectoryService(_fileSystem)),
+                recursive: false,
+                allowRemoveRoot: removeRoot,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            await GetUserRootFolder().RefreshMetadata(cancellationToken).ConfigureAwait(false);
+            var rootFolder = GetUserRootFolder();
+            rootFolder.Children = null;
 
-            await GetUserRootFolder().ValidateChildren(new SimpleProgress<double>(), cancellationToken, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem)), recursive: false).ConfigureAwait(false);
+            await rootFolder.RefreshMetadata(cancellationToken).ConfigureAwait(false);
+
+            await rootFolder.ValidateChildren(
+                new Progress<double>(),
+                new MetadataRefreshOptions(new DirectoryService(_fileSystem)),
+                recursive: false,
+                allowRemoveRoot: removeRoot,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
             // Quickly scan CollectionFolders for changes
-            foreach (var folder in GetUserRootFolder().Children.OfType<Folder>().ToList())
+            var toDelete = new List<Guid>();
+            foreach (var child in rootFolder.Children!.OfType<Folder>())
             {
-                await folder.RefreshMetadata(cancellationToken).ConfigureAwait(false);
+                // If the user has somehow deleted the collection directory, remove the metadata from the database.
+                if (child is CollectionFolder collectionFolder && !Directory.Exists(collectionFolder.Path))
+                {
+                    toDelete.Add(collectionFolder.Id);
+                }
+                else
+                {
+                    await child.RefreshMetadata(cancellationToken).ConfigureAwait(false);
+                }
             }
+
+            if (toDelete.Count > 0)
+            {
+                _persistenceService.DeleteItem(toDelete.ToArray());
+            }
+
+            ClearIgnoreRuleCache();
+        }
+
+        /// <inheritdoc />
+        public void ClearIgnoreRuleCache()
+        {
+            _dotIgnoreIgnoreRule.ClearDirectoryCache();
         }
 
         private async Task PerformLibraryValidation(IProgress<double> progress, CancellationToken cancellationToken)
@@ -1061,20 +1493,15 @@ namespace Emby.Server.Implementations.Library
 
             await ValidateTopLibraryFolders(cancellationToken).ConfigureAwait(false);
 
-            var innerProgress = new ActionableProgress<double>();
+            var innerProgress = new Progress<double>(pct => progress.Report(pct * 0.96));
 
-            innerProgress.RegisterAction(pct => progress.Report(pct * .96));
-
-            // Now validate the entire media library
-            await RootFolder.ValidateChildren(innerProgress, cancellationToken, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem)), recursive: true).ConfigureAwait(false);
+            // Validate the entire media library
+            await RootFolder.ValidateChildren(innerProgress, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), recursive: true, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             progress.Report(96);
 
-            innerProgress = new ActionableProgress<double>();
+            innerProgress = new Progress<double>(pct => progress.Report(96 + (pct * .04)));
 
-            innerProgress.RegisterAction(pct => progress.Report(96 + (pct * .04)));
-
-            // Run post-scan tasks
             await RunPostScanTasks(innerProgress, cancellationToken).ConfigureAwait(false);
 
             progress.Report(100);
@@ -1088,19 +1515,21 @@ namespace Emby.Server.Implementations.Library
         /// <returns>Task.</returns>
         private async Task RunPostScanTasks(IProgress<double> progress, CancellationToken cancellationToken)
         {
-            var tasks = PostscanTasks.ToList();
+            var tasks = PostScanTasks.ToList();
 
             var numComplete = 0;
             var numTasks = tasks.Count;
 
+            _logger.LogInformation("Running {TaskCount} post-scan task(s)", numTasks);
+
+            var phaseStart = Stopwatch.GetTimestamp();
+
             foreach (var task in tasks)
             {
-                var innerProgress = new ActionableProgress<double>();
-
                 // Prevent access to modified closure
                 var currentNumComplete = numComplete;
 
-                innerProgress.RegisterAction(pct =>
+                var innerProgress = new Progress<double>(pct =>
                 {
                     double innerPercent = pct;
                     innerPercent /= 100;
@@ -1112,20 +1541,45 @@ namespace Emby.Server.Implementations.Library
                     progress.Report(innerPercent);
                 });
 
-                _logger.LogDebug("Running post-scan task {0}", task.GetType().Name);
+                var taskName = task.GetType().Name;
+                var taskStart = Stopwatch.GetTimestamp();
+
+                _logger.LogInformation(
+                    "Running post-scan task {TaskNumber}/{TaskCount}: {TaskName}",
+                    currentNumComplete + 1,
+                    numTasks,
+                    taskName);
 
                 try
                 {
                     await task.Run(innerProgress, cancellationToken).ConfigureAwait(false);
+
+                    var elapsed = Stopwatch.GetElapsedTime(taskStart);
+                    _logger.LogInformation(
+                        "Post-scan task {TaskName} completed after {Minutes} minute(s) and {Seconds} seconds",
+                        taskName,
+                        Math.Truncate(elapsed.TotalMinutes),
+                        elapsed.Seconds);
                 }
                 catch (OperationCanceledException)
                 {
-                    _logger.LogInformation("Post-scan task cancelled: {0}", task.GetType().Name);
+                    var elapsed = Stopwatch.GetElapsedTime(taskStart);
+                    _logger.LogInformation(
+                        "Post-scan task {TaskName} cancelled after {Minutes} minute(s) and {Seconds} seconds",
+                        taskName,
+                        Math.Truncate(elapsed.TotalMinutes),
+                        elapsed.Seconds);
                     throw;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error running postscan task");
+                    var elapsed = Stopwatch.GetElapsedTime(taskStart);
+                    _logger.LogError(
+                        ex,
+                        "Post-scan task {TaskName} failed after {Minutes} minute(s) and {Seconds} seconds",
+                        taskName,
+                        Math.Truncate(elapsed.TotalMinutes),
+                        elapsed.Seconds);
                 }
 
                 numComplete++;
@@ -1134,7 +1588,13 @@ namespace Emby.Server.Implementations.Library
                 progress.Report(percent * 100);
             }
 
-            ItemRepository.UpdateInheritedValues(cancellationToken);
+            var phaseElapsed = Stopwatch.GetElapsedTime(phaseStart);
+            _logger.LogInformation(
+                "All post-scan tasks completed after {Minutes} minute(s) and {Seconds} seconds",
+                Math.Truncate(phaseElapsed.TotalMinutes),
+                phaseElapsed.Seconds);
+
+            _persistenceService.UpdateInheritedValues();
 
             progress.Report(100);
         }
@@ -1150,24 +1610,25 @@ namespace Emby.Server.Implementations.Library
 
         public List<VirtualFolderInfo> GetVirtualFolders(bool includeRefreshState)
         {
+            _logger.LogDebug("Getting topLibraryFolders");
             var topLibraryFolders = GetUserRootFolder().Children.ToList();
 
-            var refreshQueue = includeRefreshState ? _providerManagerFactory().GetRefreshQueue() : null;
+            _logger.LogDebug("Getting refreshQueue");
+            var refreshQueue = includeRefreshState ? ProviderManager.GetRefreshQueue() : null;
 
-            return _fileSystem.GetDirectoryPaths(ConfigurationManager.ApplicationPaths.DefaultUserViewsPath)
+            return _fileSystem.GetDirectoryPaths(_configurationManager.ApplicationPaths.DefaultUserViewsPath)
                 .Select(dir => GetVirtualFolderInfo(dir, topLibraryFolders, refreshQueue))
-                .OrderBy(i => i.Name)
                 .ToList();
         }
 
-        private VirtualFolderInfo GetVirtualFolderInfo(string dir, List<BaseItem> allCollectionFolders, Dictionary<Guid, Guid> refreshQueue)
+        private VirtualFolderInfo GetVirtualFolderInfo(string dir, List<BaseItem> allCollectionFolders, HashSet<Guid>? refreshQueue)
         {
             var info = new VirtualFolderInfo
             {
                 Name = Path.GetFileName(dir),
 
                 Locations = _fileSystem.GetFilePaths(dir, false)
-                .Where(i => string.Equals(ShortcutFileExtension, Path.GetExtension(i), StringComparison.OrdinalIgnoreCase))
+                .Where(i => Path.GetExtension(i.AsSpan()).Equals(ShortcutFileExtension, StringComparison.OrdinalIgnoreCase))
                     .Select(i =>
                     {
                         try
@@ -1176,70 +1637,70 @@ namespace Emby.Server.Implementations.Library
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "Error resolving shortcut file {file}", i);
+                            _logger.LogError(ex, "Error resolving shortcut file {File}", i);
                             return null;
                         }
                     })
-                    .Where(i => i != null)
-                    .OrderBy(i => i)
+                    .Where(i => i is not null)
+                    .Order()
                     .ToArray(),
 
                 CollectionType = GetCollectionType(dir)
             };
 
             var libraryFolder = allCollectionFolders.FirstOrDefault(i => string.Equals(i.Path, dir, StringComparison.OrdinalIgnoreCase));
-
-            if (libraryFolder != null && libraryFolder.HasImage(ImageType.Primary))
+            if (libraryFolder is not null)
             {
-                info.PrimaryImageItemId = libraryFolder.Id.ToString("N");
-            }
+                var libraryFolderId = libraryFolder.Id.ToString("N", CultureInfo.InvariantCulture);
+                info.ItemId = libraryFolderId;
+                if (libraryFolder.HasImage(ImageType.Primary))
+                {
+                    info.PrimaryImageItemId = libraryFolderId;
+                }
 
-            if (libraryFolder != null)
-            {
-                info.ItemId = libraryFolder.Id.ToString("N");
                 info.LibraryOptions = GetLibraryOptions(libraryFolder);
 
-                if (refreshQueue != null)
+                if (refreshQueue is not null)
                 {
                     info.RefreshProgress = libraryFolder.GetRefreshProgress();
 
-                    info.RefreshStatus = info.RefreshProgress.HasValue ? "Active" : refreshQueue.ContainsKey(libraryFolder.Id) ? "Queued" : "Idle";
+                    info.RefreshStatus = info.RefreshProgress.HasValue ? "Active" : refreshQueue.Contains(libraryFolder.Id) ? "Queued" : "Idle";
                 }
             }
 
             return info;
         }
 
-        private string GetCollectionType(string path)
+        private CollectionTypeOptions? GetCollectionType(string path)
         {
-            return _fileSystem.GetFilePaths(path, new[] { ".collection" }, true, false)
-                .Select(i => Path.GetFileNameWithoutExtension(i))
-                .FirstOrDefault(i => !string.IsNullOrEmpty(i));
-        }
-
-        /// <summary>
-        /// Gets the item by id.
-        /// </summary>
-        /// <param name="id">The id.</param>
-        /// <returns>BaseItem.</returns>
-        /// <exception cref="ArgumentNullException">id</exception>
-        public BaseItem GetItemById(Guid id)
-        {
-            if (id.Equals(Guid.Empty))
+            var files = _fileSystem.GetFilePaths(path, [".collection"], true, false);
+            foreach (ReadOnlySpan<char> file in files)
             {
-                throw new ArgumentNullException(nameof(id));
+                if (Enum.TryParse<CollectionTypeOptions>(Path.GetFileNameWithoutExtension(file), true, out var res))
+                {
+                    return res;
+                }
             }
 
-            if (LibraryItemsCache.TryGetValue(id, out BaseItem item))
+            return null;
+        }
+
+        /// <inheritdoc />
+        public BaseItem? GetItemById(Guid id)
+        {
+            if (id.IsEmpty())
+            {
+                throw new ArgumentException("Guid can't be empty", nameof(id));
+            }
+
+            if (_cache.TryGet(id, out var item))
             {
                 return item;
             }
 
             item = RetrieveItem(id);
 
-            //_logger.LogDebug("GetitemById {0}", id);
-
-            if (item != null)
+            if (item is not null)
             {
                 RegisterItem(item);
             }
@@ -1247,335 +1708,486 @@ namespace Emby.Server.Implementations.Library
             return item;
         }
 
-        public List<BaseItem> GetItemList(InternalItemsQuery query, bool allowExternalContent)
+        /// <inheritdoc />
+        public T? GetItemById<T>(Guid id)
+            where T : BaseItem
         {
-            if (query.Recursive && !query.ParentId.Equals(Guid.Empty))
+            var item = GetItemById(id);
+            if (item is T typedItem)
+            {
+                return typedItem;
+            }
+
+            return null;
+        }
+
+        /// <inheritdoc />
+        public T? GetItemById<T>(Guid id, Guid userId)
+            where T : BaseItem
+        {
+            var user = userId.IsEmpty() ? null : _userManager.GetUserById(userId);
+            return GetItemById<T>(id, user);
+        }
+
+        /// <inheritdoc />
+        public T? GetItemById<T>(Guid id, User? user)
+            where T : BaseItem
+        {
+            var item = GetItemById<T>(id);
+            return ItemIsVisible(item, user) ? item : null;
+        }
+
+        public IReadOnlyList<BaseItem> GetItemList(InternalItemsQuery query, bool allowExternalContent)
+        {
+            if (query.Recursive && !query.ParentId.IsEmpty())
             {
                 var parent = GetItemById(query.ParentId);
-                if (parent != null)
+                if (parent is not null)
                 {
-                    SetTopParentIdsOrAncestors(query, new List<BaseItem> { parent });
+                    SetTopParentIdsOrAncestors(query, [parent]);
                 }
             }
 
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User, allowExternalContent);
             }
 
-            return ItemRepository.GetItemList(query);
+            return _itemRepository.GetItemList(query);
         }
 
-        public List<BaseItem> GetItemList(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetItemList(InternalItemsQuery query)
         {
             return GetItemList(query, true);
         }
 
         public int GetCount(InternalItemsQuery query)
         {
-            if (query.Recursive && !query.ParentId.Equals(Guid.Empty))
+            if (query.Recursive && !query.ParentId.IsEmpty())
             {
                 var parent = GetItemById(query.ParentId);
-                if (parent != null)
+                if (parent is not null)
                 {
-                    SetTopParentIdsOrAncestors(query, new List<BaseItem> { parent });
+                    SetTopParentIdsOrAncestors(query, [parent]);
                 }
             }
 
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
-            return ItemRepository.GetCount(query);
+            return _countService.GetCount(query);
         }
 
-        public List<BaseItem> GetItemList(InternalItemsQuery query, List<BaseItem> parents)
+        public ItemCounts GetItemCounts(InternalItemsQuery query)
+        {
+            if (query.Recursive && !query.ParentId.IsEmpty())
+            {
+                var parent = GetItemById(query.ParentId);
+                if (parent is not null)
+                {
+                    SetTopParentIdsOrAncestors(query, [parent]);
+                }
+            }
+
+            if (query.User is not null)
+            {
+                AddUserToQuery(query, query.User);
+            }
+
+            return _countService.GetItemCounts(query);
+        }
+
+        /// <inheritdoc/>
+        public ItemCounts GetItemCountsForNameItem(BaseItemKind kind, Guid id, BaseItemKind[] relatedItemKinds, User? user)
+        {
+            var query = new InternalItemsQuery(user);
+            if (user is not null)
+            {
+                AddUserToQuery(query, user);
+            }
+
+            return _countService.GetItemCountsForNameItem(kind, id, relatedItemKinds, query);
+        }
+
+        /// <inheritdoc/>
+        public Dictionary<Guid, ItemCounts> GetItemCountsForNameItems(BaseItemKind kind, IReadOnlyList<Guid> ids, BaseItemKind[] relatedItemKinds, User? user)
+        {
+            var query = new InternalItemsQuery(user);
+            if (user is not null)
+            {
+                AddUserToQuery(query, user);
+            }
+
+            return _countService.GetItemCountsForNameItems(kind, ids, relatedItemKinds, query);
+        }
+
+        public Dictionary<Guid, int> GetChildCountBatch(IReadOnlyList<Guid> parentIds, User? user)
+        {
+            return _countService.GetChildCountBatch(parentIds, user);
+        }
+
+        /// <inheritdoc/>
+        public Dictionary<Guid, (int Played, int Total)> GetPlayedAndTotalCountBatch(IReadOnlyList<Guid> folderIds, User user)
+        {
+            return _countService.GetPlayedAndTotalCountBatch(folderIds, user);
+        }
+
+        public IReadOnlyList<BaseItem> GetItemList(InternalItemsQuery query, List<BaseItem> parents)
         {
             SetTopParentIdsOrAncestors(query, parents);
 
             if (query.AncestorIds.Length == 0 && query.TopParentIds.Length == 0)
             {
-                if (query.User != null)
+                if (query.User is not null)
                 {
                     AddUserToQuery(query, query.User);
                 }
             }
 
-            return ItemRepository.GetItemList(query);
+            return _itemRepository.GetItemList(query);
+        }
+
+        public IReadOnlyList<BaseItem> GetLatestItemList(InternalItemsQuery query, IReadOnlyList<BaseItem> parents, CollectionType collectionType)
+        {
+            SetTopParentIdsOrAncestors(query, parents);
+
+            if (query.AncestorIds.Length == 0 && query.TopParentIds.Length == 0)
+            {
+                if (query.User is not null)
+                {
+                    AddUserToQuery(query, query.User);
+                }
+            }
+
+            return _itemRepository.GetLatestItemList(query, collectionType);
+        }
+
+        public IReadOnlyList<string> GetNextUpSeriesKeys(InternalItemsQuery query, IReadOnlyCollection<BaseItem> parents, DateTime dateCutoff)
+        {
+            SetTopParentIdsOrAncestors(query, parents);
+
+            if (query.AncestorIds.Length == 0 && query.TopParentIds.Length == 0)
+            {
+                if (query.User is not null)
+                {
+                    AddUserToQuery(query, query.User);
+                }
+            }
+
+            return _nextUpService.GetNextUpSeriesKeys(query, dateCutoff);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyDictionary<string, MediaBrowser.Controller.Persistence.NextUpEpisodeBatchResult> GetNextUpEpisodesBatch(
+            InternalItemsQuery query,
+            IReadOnlyList<string> seriesKeys,
+            bool includeSpecials,
+            bool includeWatchedForRewatching)
+        {
+            return _nextUpService.GetNextUpEpisodesBatch(query, seriesKeys, includeSpecials, includeWatchedForRewatching);
         }
 
         public QueryResult<BaseItem> QueryItems(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             if (query.EnableTotalRecordCount)
             {
-                return ItemRepository.GetItems(query);
+                return _itemRepository.GetItems(query);
             }
 
-            return new QueryResult<BaseItem>
-            {
-                Items = ItemRepository.GetItemList(query).ToArray()
-            };
+            return new QueryResult<BaseItem>(
+                query.StartIndex,
+                null,
+                _itemRepository.GetItemList(query));
         }
 
-        public List<Guid> GetItemIds(InternalItemsQuery query)
+        public IReadOnlyList<Guid> GetItemIds(InternalItemsQuery query)
         {
-            if (query.User != null)
-            {
-                AddUserToQuery(query, query.User);
-            }
-
-            return ItemRepository.GetItemIdsList(query);
-        }
-
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetStudios(InternalItemsQuery query)
-        {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
-            SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetStudios(query);
+            return _itemRepository.GetItemIdsList(query);
         }
 
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetGenres(InternalItemsQuery query)
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetStudios(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetGenres(query);
+            return _itemRepository.GetStudios(query);
         }
 
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetMusicGenres(InternalItemsQuery query)
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetGenres(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetMusicGenres(query);
+            return _itemRepository.GetGenres(query);
         }
 
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetAllArtists(InternalItemsQuery query)
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetMusicGenres(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetAllArtists(query);
+            return _itemRepository.GetMusicGenres(query);
         }
 
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetArtists(InternalItemsQuery query)
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetAllArtists(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetArtists(query);
+            return _itemRepository.GetAllArtists(query);
+        }
+
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetArtists(InternalItemsQuery query)
+        {
+            if (query.User is not null)
+            {
+                AddUserToQuery(query, query.User);
+            }
+
+            SetTopParentOrAncestorIds(query);
+            return _itemRepository.GetArtists(query);
         }
 
         private void SetTopParentOrAncestorIds(InternalItemsQuery query)
         {
-            if (query.AncestorIds.Length == 0)
+            var ancestorIds = query.AncestorIds;
+            int len = ancestorIds.Length;
+            if (len == 0)
             {
                 return;
             }
 
-            var parents = query.AncestorIds.Select(i => GetItemById(i)).ToList();
-
-            if (parents.All(i =>
+            var parents = new BaseItem[len];
+            for (int i = 0; i < len; i++)
             {
-                if (i is ICollectionFolder || i is UserView)
+                parents[i] = GetItemById(ancestorIds[i]) ?? throw new ArgumentException($"Failed to find parent with id: {ancestorIds[i]}");
+                if (parents[i] is not (ICollectionFolder or UserView))
                 {
-                    return true;
-                }
-
-                //_logger.LogDebug("Query requires ancestor query due to type: " + i.GetType().Name);
-                return false;
-
-            }))
-            {
-                // Optimize by querying against top level views
-                query.TopParentIds = parents.SelectMany(i => GetTopParentIdsForQuery(i, query.User)).ToArray();
-                query.AncestorIds = Array.Empty<Guid>();
-
-                // Prevent searching in all libraries due to empty filter
-                if (query.TopParentIds.Length == 0)
-                {
-                    query.TopParentIds = new[] { Guid.NewGuid() };
+                    return;
                 }
             }
+
+            // Optimize by querying against top level views
+            var topParentIds = parents.SelectMany(i => GetTopParentIdsForQuery(i, query.User)).ToArray();
+            if (topParentIds.Length == 0)
+            {
+                return;
+            }
+
+            query.TopParentIds = topParentIds;
+            query.AncestorIds = [];
         }
 
-        public QueryResult<Tuple<BaseItem, ItemCounts>> GetAlbumArtists(InternalItemsQuery query)
+        public QueryResult<(BaseItem Item, ItemCounts ItemCounts)> GetAlbumArtists(InternalItemsQuery query)
         {
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             SetTopParentOrAncestorIds(query);
-            return ItemRepository.GetAlbumArtists(query);
+            return _itemRepository.GetAlbumArtists(query);
         }
 
         public QueryResult<BaseItem> GetItemsResult(InternalItemsQuery query)
         {
-            if (query.Recursive && !query.ParentId.Equals(Guid.Empty))
+            if (query.Recursive && !query.ParentId.IsEmpty())
             {
                 var parent = GetItemById(query.ParentId);
-                if (parent != null)
+                if (parent is not null)
                 {
-                    SetTopParentIdsOrAncestors(query, new List<BaseItem> { parent });
+                    SetTopParentIdsOrAncestors(query, [parent]);
                 }
             }
 
-            if (query.User != null)
+            if (query.User is not null)
             {
                 AddUserToQuery(query, query.User);
             }
 
             if (query.EnableTotalRecordCount)
             {
-                return ItemRepository.GetItems(query);
+                return _itemRepository.GetItems(query);
             }
 
-            var list = ItemRepository.GetItemList(query);
-
-            return new QueryResult<BaseItem>
-            {
-                Items = list.ToArray()
-            };
+            return new QueryResult<BaseItem>(
+                query.StartIndex,
+                null,
+                _itemRepository.GetItemList(query));
         }
 
-        private void SetTopParentIdsOrAncestors(InternalItemsQuery query, List<BaseItem> parents)
+        private void SetTopParentIdsOrAncestors(InternalItemsQuery query, IReadOnlyCollection<BaseItem> parents)
         {
-            if (parents.All(i =>
-            {
-                if (i is ICollectionFolder || i is UserView)
-                {
-                    return true;
-                }
-
-                //_logger.LogDebug("Query requires ancestor query due to type: " + i.GetType().Name);
-                return false;
-
-            }))
+            if (parents.All(i => i is ICollectionFolder || i is UserView))
             {
                 // Optimize by querying against top level views
-                query.TopParentIds = parents.SelectMany(i => GetTopParentIdsForQuery(i, query.User)).ToArray();
+                var topParentIds = parents.SelectMany(i => GetTopParentIdsForQuery(i, query.User)).ToArray();
 
-                // Prevent searching in all libraries due to empty filter
-                if (query.TopParentIds.Length == 0)
+                if (topParentIds.Length > 0)
                 {
-                    query.TopParentIds = new[] { Guid.NewGuid() };
+                    query.TopParentIds = topParentIds;
                 }
+                else
+                {
+                    SetAncestorIds(query, parents);
+                }
+            }
+            else if (parents.Count == 1 && parents.First() is Folder folder
+                && (folder is Playlist || folder is BoxSet)
+                && folder.LinkedChildren.Length > 0)
+            {
+                // Playlists and BoxSets store their contents in LinkedChildren and never
+                // populate AncestorIds for those items, so a recursive AncestorIds query
+                // would return zero rows. Filter by the descendant set instead, which follows
+                // the links and keeps descending, so a linked folder contributes what is below
+                // it as well - the episodes of a Series added to a collection, for example.
+                query.DescendantOfId = folder.Id;
             }
             else
             {
-                // We need to be able to query from any arbitrary ancestor up the tree
-                query.AncestorIds = parents.SelectMany(i => i.GetIdsForAncestorQuery()).ToArray();
-
-                // Prevent searching in all libraries due to empty filter
-                if (query.AncestorIds.Length == 0)
-                {
-                    query.AncestorIds = new[] { Guid.NewGuid() };
-                }
+                SetAncestorIds(query, parents);
             }
 
             query.Parent = null;
         }
 
+        private static void SetAncestorIds(InternalItemsQuery query, IReadOnlyCollection<BaseItem> parents)
+        {
+            // We need to be able to query from any arbitrary ancestor up the tree
+            query.AncestorIds = parents.SelectMany(i => i.GetIdsForAncestorQuery()).ToArray();
+
+            // Prevent searching in all libraries due to empty filter
+            if (query.AncestorIds.Length == 0)
+            {
+                query.AncestorIds = [Guid.NewGuid()];
+            }
+        }
+
         private void AddUserToQuery(InternalItemsQuery query, User user, bool allowExternalContent = true)
         {
+            if (query.User is null)
+            {
+                query.SetUser(user);
+            }
+
             if (query.AncestorIds.Length == 0 &&
-                query.ParentId.Equals(Guid.Empty) &&
-                query.ChannelIds.Length == 0 &&
+                query.ParentId.IsEmpty() &&
+                query.ChannelIds.Count == 0 &&
                 query.TopParentIds.Length == 0 &&
                 string.IsNullOrEmpty(query.AncestorWithPresentationUniqueKey) &&
                 string.IsNullOrEmpty(query.SeriesPresentationUniqueKey) &&
-                query.ItemIds.Length == 0)
+                query.ItemIds.Length == 0 &&
+                query.OwnerIds.Length == 0)
             {
-                var userViews = _userviewManager().GetUserViews(new UserViewQuery
+                var userViews = UserViewManager.GetUserViews(new UserViewQuery
                 {
-                    UserId = user.Id,
+                    User = user,
                     IncludeHidden = true,
                     IncludeExternalContent = allowExternalContent
                 });
 
                 query.TopParentIds = userViews.SelectMany(i => GetTopParentIdsForQuery(i, user)).ToArray();
+
+                // Prevent searching in all libraries due to empty filter
+                if (query.TopParentIds.Length == 0)
+                {
+                    query.TopParentIds = [Guid.NewGuid()];
+                }
             }
         }
 
-        private IEnumerable<Guid> GetTopParentIdsForQuery(BaseItem item, User user)
+        /// <inheritdoc/>
+        public void ConfigureUserAccess(InternalItemsQuery query, User user)
         {
-            var view = item as UserView;
+            ArgumentNullException.ThrowIfNull(query);
+            ArgumentNullException.ThrowIfNull(user);
 
-            if (view != null)
+            AddUserToQuery(query, user);
+        }
+
+        private IEnumerable<Guid> GetTopParentIdsForQuery(BaseItem item, User? user)
+        {
+            if (item is UserView view)
             {
-                if (string.Equals(view.ViewType, CollectionType.LiveTv))
+                if (view.ViewType == CollectionType.livetv)
                 {
-                    return new[] { view.Id };
+                    return [view.Id];
                 }
 
                 // Translate view into folders
-                if (!view.DisplayParentId.Equals(Guid.Empty))
+                if (!view.DisplayParentId.IsEmpty())
                 {
                     var displayParent = GetItemById(view.DisplayParentId);
-                    if (displayParent != null)
+                    if (displayParent is not null)
                     {
                         return GetTopParentIdsForQuery(displayParent, user);
                     }
-                    return Array.Empty<Guid>();
+
+                    return [];
                 }
-                if (!view.ParentId.Equals(Guid.Empty))
+
+                if (!view.ParentId.IsEmpty())
                 {
                     var displayParent = GetItemById(view.ParentId);
-                    if (displayParent != null)
+                    if (displayParent is not null)
                     {
                         return GetTopParentIdsForQuery(displayParent, user);
                     }
-                    return Array.Empty<Guid>();
+
+                    return [];
                 }
 
                 // Handle grouping
-                if (user != null && !string.IsNullOrEmpty(view.ViewType) && UserView.IsEligibleForGrouping(view.ViewType) && user.Configuration.GroupedFolders.Length > 0)
+                if (user is not null && view.ViewType != CollectionType.unknown && UserView.IsEligibleForGrouping(view.ViewType)
+                    && user.GetPreference(PreferenceKind.GroupedFolders).Length > 0)
                 {
                     return GetUserRootFolder()
                         .GetChildren(user, true)
                         .OfType<CollectionFolder>()
-                        .Where(i => string.IsNullOrEmpty(i.CollectionType) || string.Equals(i.CollectionType, view.ViewType, StringComparison.OrdinalIgnoreCase))
+                        .Where(i => i.CollectionType is null || i.CollectionType == view.ViewType)
                         .Where(i => user.IsFolderGrouped(i.Id))
                         .SelectMany(i => GetTopParentIdsForQuery(i, user));
                 }
-                return Array.Empty<Guid>();
+
+                return [];
             }
 
-            var collectionFolder = item as CollectionFolder;
-            if (collectionFolder != null)
+            if (item is CollectionFolder collectionFolder)
             {
                 return collectionFolder.PhysicalFolderIds;
             }
 
             var topParent = item.GetTopParent();
-            if (topParent != null)
+            if (topParent is not null)
             {
-                return new[] { topParent.Id };
+                return [topParent.Id];
             }
-            return Array.Empty<Guid>();
+
+            return [];
         }
 
         /// <summary>
@@ -1586,17 +2198,20 @@ namespace Emby.Server.Implementations.Library
         /// <returns>IEnumerable{System.String}.</returns>
         public async Task<IEnumerable<Video>> GetIntros(BaseItem item, User user)
         {
+            if (IntroProviders.Length == 0)
+            {
+                return [];
+            }
+
             var tasks = IntroProviders
-                .OrderBy(i => i.GetType().Name.IndexOf("Default", StringComparison.OrdinalIgnoreCase) == -1 ? 0 : 1)
-                .Take(1)
                 .Select(i => GetIntros(i, item, user));
 
             var items = await Task.WhenAll(tasks).ConfigureAwait(false);
 
             return items
-                .SelectMany(i => i.ToArray())
+                .SelectMany(i => i)
                 .Select(ResolveIntro)
-                .Where(i => i != null);
+                .Where(i => i is not null)!; // null values got filtered out
         }
 
         /// <summary>
@@ -1616,29 +2231,8 @@ namespace Emby.Server.Implementations.Library
             {
                 _logger.LogError(ex, "Error getting intros");
 
-                return new List<IntroInfo>();
+                return [];
             }
-        }
-
-        /// <summary>
-        /// Gets all intro files.
-        /// </summary>
-        /// <returns>IEnumerable{System.String}.</returns>
-        public IEnumerable<string> GetAllIntroFiles()
-        {
-            return IntroProviders.SelectMany(i =>
-            {
-                try
-                {
-                    return i.GetAllIntroFiles().ToList();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error getting intro files");
-
-                    return new List<string>();
-                }
-            });
         }
 
         /// <summary>
@@ -1646,16 +2240,16 @@ namespace Emby.Server.Implementations.Library
         /// </summary>
         /// <param name="info">The info.</param>
         /// <returns>Video.</returns>
-        private Video ResolveIntro(IntroInfo info)
+        private Video? ResolveIntro(IntroInfo info)
         {
-            Video video = null;
+            Video? video = null;
 
             if (info.ItemId.HasValue)
             {
                 // Get an existing item by Id
                 video = GetItemById(info.ItemId.Value) as Video;
 
-                if (video == null)
+                if (video is null)
                 {
                     _logger.LogError("Unable to locate item with Id {ID}.", info.ItemId.Value);
                 }
@@ -1667,16 +2261,16 @@ namespace Emby.Server.Implementations.Library
                     // Try to resolve the path into a video
                     video = ResolvePath(_fileSystem.GetFileSystemInfo(info.Path)) as Video;
 
-                    if (video == null)
+                    if (video is null)
                     {
-                        _logger.LogError("Intro resolver returned null for {path}.", info.Path);
+                        _logger.LogError("Intro resolver returned null for {Path}.", info.Path);
                     }
                     else
                     {
                         // Pull the saved db item that will include metadata
                         var dbItem = GetItemById(video.Id) as Video;
 
-                        if (dbItem != null)
+                        if (dbItem is not null)
                         {
                             video = dbItem;
                         }
@@ -1688,7 +2282,7 @@ namespace Emby.Server.Implementations.Library
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error resolving path {path}.", info.Path);
+                    _logger.LogError(ex, "Error resolving path {Path}.", info.Path);
                 }
             }
             else
@@ -1699,63 +2293,115 @@ namespace Emby.Server.Implementations.Library
             return video;
         }
 
-        /// <summary>
-        /// Sorts the specified sort by.
-        /// </summary>
-        /// <param name="items">The items.</param>
-        /// <param name="user">The user.</param>
-        /// <param name="sortBy">The sort by.</param>
-        /// <param name="sortOrder">The sort order.</param>
-        /// <returns>IEnumerable{BaseItem}.</returns>
-        public IEnumerable<BaseItem> Sort(IEnumerable<BaseItem> items, User user, IEnumerable<string> sortBy, SortOrder sortOrder)
+        /// <inheritdoc />
+        public IEnumerable<Guid> GetLocalAlternateVersionIds(Video video)
         {
-            var isFirst = true;
+            ArgumentNullException.ThrowIfNull(video);
 
-            IOrderedEnumerable<BaseItem> orderedItems = null;
-
-            foreach (var orderBy in sortBy.Select(o => GetComparer(o, user)).Where(c => c != null))
+            var linkedIds = _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LocalAlternateVersion);
+            if (linkedIds.Count > 0)
             {
-                if (isFirst)
+                return linkedIds;
+            }
+
+            return [];
+        }
+
+        /// <inheritdoc />
+        public IEnumerable<Video> GetLinkedAlternateVersions(Video video)
+        {
+            ArgumentNullException.ThrowIfNull(video);
+
+            var linkedIds = _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
+            if (linkedIds.Count > 0)
+            {
+                return linkedIds
+                    .Select(id => GetItemById(id))
+                    .Where(i => i is not null)
+                    .OfType<Video>()
+                    .OrderBy(i => i.SortName);
+            }
+
+            return [];
+        }
+
+        /// <inheritdoc />
+        public IReadOnlySet<Guid> GetItemIdsWithAlternateVersions(IReadOnlyList<Guid> itemIds)
+        {
+            return _linkedChildrenService.GetItemIdsWithAlternateVersions(itemIds);
+        }
+
+        /// <inheritdoc />
+        public void UpsertLinkedChild(Guid parentId, Guid childId, MediaBrowser.Controller.Entities.LinkedChildType childType)
+        {
+            _linkedChildrenService.UpsertLinkedChild(parentId, childId, childType);
+        }
+
+        /// <inheritdoc />
+        public IEnumerable<BaseItem> Sort(IEnumerable<BaseItem> items, User? user, IEnumerable<ItemSortBy> sortBy, SortOrder sortOrder)
+        {
+            IOrderedEnumerable<BaseItem>? orderedItems = null;
+
+            foreach (var orderBy in sortBy.Select(o => GetComparer(o, user)).Where(c => c is not null))
+            {
+                if (orderBy is RandomComparer)
                 {
-                    orderedItems = sortOrder == SortOrder.Descending ? items.OrderByDescending(i => i, orderBy) : items.OrderBy(i => i, orderBy);
+                    var randomItems = items.ToArray();
+                    Random.Shared.Shuffle(randomItems);
+                    items = randomItems;
+                    // Items are no longer ordered at this point, so set orderedItems back to null
+                    orderedItems = null;
+                }
+                else if (orderedItems is null)
+                {
+                    orderedItems = sortOrder == SortOrder.Descending
+                        ? items.OrderByDescending(i => i, orderBy)
+                        : items.OrderBy(i => i, orderBy);
                 }
                 else
                 {
-                    orderedItems = sortOrder == SortOrder.Descending ? orderedItems.ThenByDescending(i => i, orderBy) : orderedItems.ThenBy(i => i, orderBy);
+                    orderedItems = sortOrder == SortOrder.Descending
+                        ? orderedItems!.ThenByDescending(i => i, orderBy)
+                        : orderedItems!.ThenBy(i => i, orderBy); // orderedItems is set during the first iteration
                 }
-
-                isFirst = false;
             }
 
             return orderedItems ?? items;
         }
 
-        public IEnumerable<BaseItem> Sort(IEnumerable<BaseItem> items, User user, IEnumerable<ValueTuple<string, SortOrder>> orderByList)
+        /// <inheritdoc />
+        public IEnumerable<BaseItem> Sort(IEnumerable<BaseItem> items, User? user, IEnumerable<(ItemSortBy OrderBy, SortOrder SortOrder)> orderBy)
         {
-            var isFirst = true;
+            IOrderedEnumerable<BaseItem>? orderedItems = null;
 
-            IOrderedEnumerable<BaseItem> orderedItems = null;
-
-            foreach (var orderBy in orderByList)
+            foreach (var (name, sortOrder) in orderBy)
             {
-                var comparer = GetComparer(orderBy.Item1, user);
-                if (comparer == null)
+                var comparer = GetComparer(name, user);
+                if (comparer is null)
                 {
                     continue;
                 }
 
-                var sortOrder = orderBy.Item2;
-
-                if (isFirst)
+                if (comparer is RandomComparer)
                 {
-                    orderedItems = sortOrder == SortOrder.Descending ? items.OrderByDescending(i => i, comparer) : items.OrderBy(i => i, comparer);
+                    var randomItems = items.ToArray();
+                    Random.Shared.Shuffle(randomItems);
+                    items = randomItems;
+                    // Items are no longer ordered at this point, so set orderedItems back to null
+                    orderedItems = null;
+                }
+                else if (orderedItems is null)
+                {
+                    orderedItems = sortOrder == SortOrder.Descending
+                        ? items.OrderByDescending(i => i, comparer)
+                        : items.OrderBy(i => i, comparer);
                 }
                 else
                 {
-                    orderedItems = sortOrder == SortOrder.Descending ? orderedItems.ThenByDescending(i => i, comparer) : orderedItems.ThenBy(i => i, comparer);
+                    orderedItems = sortOrder == SortOrder.Descending
+                        ? orderedItems!.ThenByDescending(i => i, comparer)
+                        : orderedItems!.ThenBy(i => i, comparer); // orderedItems is set during the first iteration
                 }
-
-                isFirst = false;
             }
 
             return orderedItems ?? items;
@@ -1767,112 +2413,95 @@ namespace Emby.Server.Implementations.Library
         /// <param name="name">The name.</param>
         /// <param name="user">The user.</param>
         /// <returns>IBaseItemComparer.</returns>
-        private IBaseItemComparer GetComparer(string name, User user)
+        private IBaseItemComparer? GetComparer(ItemSortBy name, User? user)
         {
-            var comparer = Comparers.FirstOrDefault(c => string.Equals(name, c.Name, StringComparison.OrdinalIgnoreCase));
+            var comparer = Comparers.FirstOrDefault(c => name == c.Type);
 
-            if (comparer != null)
+            if (comparer is IUserBaseItemComparer)
             {
-                // If it requires a user, create a new one, and assign the user
-                if (comparer is IUserBaseItemComparer)
+                if (user is null)
                 {
-                    var userComparer = (IUserBaseItemComparer)Activator.CreateInstance(comparer.GetType());
-
-                    userComparer.User = user;
-                    userComparer.UserManager = _userManager;
-                    userComparer.UserDataRepository = _userDataRepository;
-
-                    return userComparer;
+                    throw new ArgumentException($"Sort key '{name}' requires a user, but none was provided.");
                 }
+
+                var userComparer = (IUserBaseItemComparer)Activator.CreateInstance(comparer.GetType())!; // only null for Nullable<T> instances
+
+                userComparer.User = user;
+                userComparer.UserManager = _userManager;
+                userComparer.UserDataManager = _userDataManager;
+
+                return userComparer;
             }
 
             return comparer;
         }
 
-        /// <summary>
-        /// Creates the item.
-        /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="parent">The parent item.</param>
-        /// <returns>Task.</returns>
-        public void CreateItem(BaseItem item, BaseItem parent)
+        /// <inheritdoc />
+        public void CreateItem(BaseItem item, BaseItem? parent)
         {
-            CreateItems(new[] { item }, parent, CancellationToken.None);
+            CreateItems([item], parent, CancellationToken.None);
         }
 
-        /// <summary>
-        /// Creates the items.
-        /// </summary>
-        /// <param name="items">The items.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>Task.</returns>
-        public void CreateItems(IEnumerable<BaseItem> items, BaseItem parent, CancellationToken cancellationToken)
+        /// <inheritdoc />
+        public void CreateItems(IReadOnlyList<BaseItem> items, BaseItem? parent, CancellationToken cancellationToken)
         {
-            var list = items.ToList();
-
-            ItemRepository.SaveItems(list, cancellationToken);
-
-            foreach (var item in list)
-            {
-                RegisterItem(item);
-            }
-
-            if (ItemAdded != null)
-            {
-                foreach (var item in list)
-                {
-                    // With the live tv guide this just creates too much noise
-                    if (item.SourceType != SourceType.Library)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        ItemAdded(this, new ItemChangeEventArgs
-                        {
-                            Item = item,
-                            Parent = parent ?? item.GetParent()
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error in ItemAdded event handler");
-                    }
-                }
-            }
-        }
-
-        public void UpdateImages(BaseItem item)
-        {
-            ItemRepository.SaveImages(item);
-
-            RegisterItem(item);
-        }
-
-        /// <summary>
-        /// Updates the item.
-        /// </summary>
-        public void UpdateItems(List<BaseItem> items, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
-        {
+            // Resolve and add any local alternate version items that don't exist yet
+            // This ensures they exist in the database when LinkedChildren are processed
+            var allItems = new List<BaseItem>(items);
+            var parentFolder = parent as Folder;
+            var parentCollectionType = parent is not null ? GetTopFolderContentType(parent) : null;
             foreach (var item in items)
             {
-                if (item.IsFileProtocol)
+                // Parental controls filter on the stored score, so it has to match the ratings being saved.
+                item.OnMetadataChanged();
+
+                if (item is Video video && video.LocalAlternateVersions.Length > 0)
                 {
-                    _providerManagerFactory().SaveMetadata(item, updateReason);
+                    var videoType = video.GetType();
+                    foreach (var path in video.LocalAlternateVersions)
+                    {
+                        if (string.IsNullOrEmpty(path))
+                        {
+                            continue;
+                        }
+
+                        // Use the primary video's type for ID calculation to ensure consistency
+                        var altId = GetNewItemId(path, videoType);
+                        if (GetItemById(altId) is null && !allItems.Any(i => i.Id.Equals(altId)))
+                        {
+                            // Alternate version doesn't exist, resolve and create it
+                            // ensuring it has the same type as the primary video
+                            var altVideo = ResolveAlternateVersion(path, videoType, parentFolder, parentCollectionType);
+                            if (altVideo is not null)
+                            {
+                                altVideo.OwnerId = video.Id;
+                                altVideo.SetPrimaryVersionId(video.Id);
+                                altVideo.IsInMixedFolder = video.IsInMixedFolder;
+                                // ResolveAlternateVersion only sees the alternate's primary file.
+                                // If the alternate is itself a stack (e.g. 1080p part1 + part2),
+                                // detect its parts from sibling files so its AdditionalParts persist.
+                                SetAdditionalPartsFromStack(altVideo, path);
+                                allItems.Add(altVideo);
+                            }
+                        }
+                    }
                 }
+            }
 
-                item.DateLastSaved = DateTime.UtcNow;
+            _persistenceService.SaveItems(allItems, cancellationToken);
 
+            foreach (var item in allItems)
+            {
                 RegisterItem(item);
             }
 
-            //var logName = item.LocationType == LocationType.Remote ? item.Name ?? item.Path : item.Path ?? item.Name;
-            //_logger.LogDebug("Saving {0} to database.", logName);
+            if (parent is Folder folder)
+            {
+                folder.Children = null;
+                folder.UserData = null;
+            }
 
-            ItemRepository.SaveItems(items, cancellationToken);
-
-            if (ItemUpdated != null)
+            if (ItemAdded is not null)
             {
                 foreach (var item in items)
                 {
@@ -1884,12 +2513,242 @@ namespace Emby.Server.Implementations.Library
 
                     try
                     {
-                        ItemUpdated(this, new ItemChangeEventArgs
+                        ItemAdded(
+                            this,
+                            new ItemChangeEventArgs
+                            {
+                                Item = item,
+                                Parent = parent ?? item.GetParent()
+                            });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error in ItemAdded event handler");
+                    }
+                }
+            }
+        }
+
+        private bool ImageNeedsRefresh(ItemImageInfo image)
+        {
+            if (image.Path is not null && image.IsLocalFile)
+            {
+                if (image.Width == 0 || image.Height == 0 || string.IsNullOrEmpty(image.BlurHash))
+                {
+                    return true;
+                }
+
+                try
+                {
+                    return image.DateModified.Subtract(_fileSystem.GetLastWriteTimeUtc(image.Path)).Duration().TotalSeconds > 1;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Cannot get file info for {0}", image.Path);
+                    return false;
+                }
+            }
+
+            return image.Path is not null && !image.IsLocalFile;
+        }
+
+        /// <inheritdoc />
+        public async Task UpdateImagesAsync(BaseItem item, bool forceUpdate = false)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+
+            var outdated = forceUpdate
+                ? item.ImageInfos.Where(i => i.Path is not null).ToArray()
+                : item.ImageInfos.Where(ImageNeedsRefresh).ToArray();
+
+            var parentItem = item.GetParent();
+            var isLiveTvShow = item.SourceType != SourceType.Library &&
+                               parentItem is not null &&
+                               parentItem.SourceType != SourceType.Library; // not a channel
+
+            // Skip image processing if current or live tv show
+            if (outdated.Length == 0 || isLiveTvShow)
+            {
+                RegisterItem(item);
+                return;
+            }
+
+            foreach (var img in outdated)
+            {
+                var image = img;
+                if (!img.IsLocalFile)
+                {
+                    try
+                    {
+                        var index = item.GetImageIndex(img);
+                        image = await ConvertImageToLocal(item, img, index, true).ConfigureAwait(false);
+                    }
+                    catch (ArgumentException)
+                    {
+                        _logger.LogWarning("Cannot get image index for {ImagePath}", img.Path);
+                        continue;
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException)
+                    {
+                        _logger.LogWarning(ex, "Cannot fetch image from {ImagePath}", img.Path);
+                        continue;
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        _logger.LogWarning(ex, "Cannot fetch image from {ImagePath}. Http status code: {HttpStatus}", img.Path, ex.StatusCode);
+                        continue;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(image.Path) || !File.Exists(image.Path))
+                {
+                    _logger.LogWarning(
+                        "{ImageType} image for {ItemName} ({ItemId}) not found at \"{ImagePath}\", source was {SourcePath}",
+                        img.Type,
+                        item.Name,
+                        item.Id,
+                        image.Path,
+                        img.Path);
+                    continue;
+                }
+
+                ImageDimensions size;
+                try
+                {
+                    size = _imageProcessor.GetImageDimensions(item, image);
+                    image.Width = size.Width;
+                    image.Height = size.Height;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Cannot get image dimensions for {ImagePath}", image.Path);
+                    size = default;
+                    image.Width = 0;
+                    image.Height = 0;
+                }
+
+                try
+                {
+                    var blurhash = _imageProcessor.GetImageBlurHash(image.Path, size);
+                    image.BlurHash = blurhash;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Cannot compute blurhash for {ImagePath}", image.Path);
+                    image.BlurHash = string.Empty;
+                }
+
+                try
+                {
+                    var modifiedDate = _fileSystem.GetLastWriteTimeUtc(image.Path);
+                    image.DateModified = modifiedDate;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Cannot update DateModified for {ImagePath}", image.Path);
+                }
+            }
+
+            item.ValidateImages();
+
+            await _persistenceService.SaveImagesAsync(item).ConfigureAwait(false);
+
+            RegisterItem(item);
+        }
+
+        /// <inheritdoc />
+        public async Task UpdateItemsAsync(IReadOnlyList<BaseItem> items, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
+        {
+            foreach (var item in items)
+            {
+                // Parental controls filter on the stored score, so it has to match the ratings being saved.
+                item.OnMetadataChanged();
+
+                item.DateLastSaved = DateTime.UtcNow;
+                await RunMetadataSavers(item, updateReason).ConfigureAwait(false);
+
+                // Modify again, so saved value is after write time of externally saved metadata
+                item.DateLastSaved = DateTime.UtcNow;
+            }
+
+            ForgetDroppedLocalAlternateVersions(items);
+
+            // Resolve and add any local alternate version items that don't exist yet
+            // This ensures they exist in the database when LinkedChildren are processed
+            var allItems = new List<BaseItem>(items);
+            var parentFolder = parent as Folder;
+            var parentCollectionType = GetTopFolderContentType(parent);
+            foreach (var item in items)
+            {
+                if (item is Video video && video.LocalAlternateVersions.Length > 0)
+                {
+                    var videoType = video.GetType();
+                    foreach (var path in video.LocalAlternateVersions)
+                    {
+                        if (string.IsNullOrEmpty(path))
                         {
-                            Item = item,
-                            Parent = parent,
-                            UpdateReason = updateReason
-                        });
+                            continue;
+                        }
+
+                        // Use the primary video's type for ID calculation to ensure consistency
+                        var altId = GetNewItemId(path, videoType);
+                        if (GetItemById(altId) is null && !allItems.Any(i => i.Id.Equals(altId)))
+                        {
+                            // Alternate version doesn't exist, resolve and create it
+                            // ensuring it has the same type as the primary video
+                            var altVideo = ResolveAlternateVersion(path, videoType, parentFolder, parentCollectionType);
+                            if (altVideo is not null)
+                            {
+                                altVideo.OwnerId = video.Id;
+                                altVideo.SetPrimaryVersionId(video.Id);
+                                altVideo.IsInMixedFolder = video.IsInMixedFolder;
+                                // ResolveAlternateVersion only sees the alternate's primary file.
+                                // If the alternate is itself a stack (e.g. 1080p part1 + part2),
+                                // detect its parts from sibling files so its AdditionalParts persist.
+                                SetAdditionalPartsFromStack(altVideo, path);
+                                allItems.Add(altVideo);
+                            }
+                        }
+                    }
+                }
+            }
+
+            _persistenceService.SaveItems(allItems, cancellationToken);
+
+            foreach (var item in allItems)
+            {
+                if (!items.Contains(item))
+                {
+                    RegisterItem(item);
+                }
+            }
+
+            if (parent is Folder folder)
+            {
+                folder.Children = null;
+                folder.UserData = null;
+            }
+
+            if (ItemUpdated is not null)
+            {
+                foreach (var item in items)
+                {
+                    // With the live tv guide this just creates too much noise
+                    if (item.SourceType != SourceType.Library)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        ItemUpdated(
+                            this,
+                            new ItemChangeEventArgs
+                            {
+                                Item = item,
+                                Parent = parent,
+                                UpdateReason = updateReason
+                            });
                     }
                     catch (Exception ex)
                     {
@@ -1899,33 +2758,68 @@ namespace Emby.Server.Implementations.Library
             }
         }
 
+        /// <inheritdoc />
+        public Task UpdateItemAsync(BaseItem item, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
+            => UpdateItemsAsync([item], parent, updateReason, cancellationToken);
+
         /// <summary>
-        /// Updates the item.
+        /// Forgets the cached local alternate versions of the supplied items that they no longer list.
         /// </summary>
-        /// <param name="item">The item.</param>
-        /// <param name="updateReason">The update reason.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>Task.</returns>
-        public void UpdateItem(BaseItem item, BaseItem parent, ItemUpdateType updateReason, CancellationToken cancellationToken)
+        /// <param name="items">The items about to be saved.</param>
+        private void ForgetDroppedLocalAlternateVersions(IReadOnlyList<BaseItem> items)
         {
-            UpdateItems(new List<BaseItem> { item }, parent, updateReason, cancellationToken);
+            foreach (var video in items.OfType<Video>())
+            {
+                var videoType = video.GetType();
+                var keptIds = video.LocalAlternateVersions
+                    .Where(path => !string.IsNullOrEmpty(path))
+                    .Select(path => GetNewItemId(path, videoType))
+                    .ToHashSet();
+
+                foreach (var versionId in GetLocalAlternateVersionIds(video))
+                {
+                    if (!keptIds.Contains(versionId))
+                    {
+                        _cache.TryRemove(versionId, out _);
+                    }
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task ReattachUserDataAsync(BaseItem item, CancellationToken cancellationToken)
+        {
+            await _persistenceService.ReattachUserDataAsync(item, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task RunMetadataSavers(BaseItem item, ItemUpdateType updateReason)
+        {
+            if (item.IsFileProtocol)
+            {
+                await ProviderManager.SaveMetadataAsync(item, updateReason).ConfigureAwait(false);
+            }
+
+            await UpdateImagesAsync(item, updateReason >= ItemUpdateType.ImageUpdate).ConfigureAwait(false);
         }
 
         /// <summary>
         /// Reports the item removed.
         /// </summary>
         /// <param name="item">The item.</param>
+        /// <param name="parent">The parent item.</param>
         public void ReportItemRemoved(BaseItem item, BaseItem parent)
         {
-            if (ItemRemoved != null)
+            if (ItemRemoved is not null)
             {
                 try
                 {
-                    ItemRemoved(this, new ItemChangeEventArgs
-                    {
-                        Item = item,
-                        Parent = parent
-                    });
+                    ItemRemoved(
+                        this,
+                        new ItemChangeEventArgs
+                        {
+                            Item = item,
+                            Parent = parent
+                        });
                 }
                 catch (Exception ex)
                 {
@@ -1941,148 +2835,151 @@ namespace Emby.Server.Implementations.Library
         /// <returns>BaseItem.</returns>
         public BaseItem RetrieveItem(Guid id)
         {
-            return ItemRepository.RetrieveItem(id);
+            return _itemRepository.RetrieveItem(id);
         }
 
         public List<Folder> GetCollectionFolders(BaseItem item)
         {
-            while (item != null)
-            {
-                var parent = item.GetParent();
-
-                if (parent == null || parent is AggregateFolder)
-                {
-                    break;
-                }
-
-                item = parent;
-            }
-
-            if (item == null)
-            {
-                return new List<Folder>();
-            }
-
-            return GetCollectionFoldersInternal(item, GetUserRootFolder().Children.OfType<Folder>().ToList());
+            return GetCollectionFolders(item, GetUserRootFolder().Children.OfType<Folder>());
         }
 
-        public List<Folder> GetCollectionFolders(BaseItem item, List<Folder> allUserRootChildren)
+        public List<Folder> GetCollectionFolders(BaseItem item, IEnumerable<Folder> allUserRootChildren)
         {
-            while (item != null)
+            while (item is not null)
             {
                 var parent = item.GetParent();
 
-                if (parent == null || parent is AggregateFolder)
+                if (parent is AggregateFolder)
                 {
                     break;
                 }
 
-                item = parent;
+                if (parent is null)
+                {
+                    var owner = item.GetOwner();
+
+                    if (owner is null)
+                    {
+                        break;
+                    }
+
+                    item = owner;
+                }
+                else
+                {
+                    item = parent;
+                }
             }
 
-            if (item == null)
+            if (item is null)
             {
-                return new List<Folder>();
+                return [];
             }
 
             return GetCollectionFoldersInternal(item, allUserRootChildren);
         }
 
-        private static List<Folder> GetCollectionFoldersInternal(BaseItem item, List<Folder> allUserRootChildren)
+        private static List<Folder> GetCollectionFoldersInternal(BaseItem item, IEnumerable<Folder> allUserRootChildren)
         {
             return allUserRootChildren
-                .Where(i => string.Equals(i.Path, item.Path, StringComparison.OrdinalIgnoreCase) || i.PhysicalLocations.Contains(item.Path, StringComparer.OrdinalIgnoreCase))
+                .Where(i => string.Equals(i.Path, item.Path, StringComparison.OrdinalIgnoreCase) || i.PhysicalLocations.Contains(item.Path.AsSpan(), StringComparison.OrdinalIgnoreCase))
                 .ToList();
         }
 
         public LibraryOptions GetLibraryOptions(BaseItem item)
         {
-            var collectionFolder = item as CollectionFolder;
-            if (collectionFolder == null)
+            if (item is CollectionFolder collectionFolder)
             {
-                collectionFolder = GetCollectionFolders(item)
-                   .OfType<CollectionFolder>()
-                   .FirstOrDefault();
+                return collectionFolder.GetLibraryOptions();
             }
 
-            var options = collectionFolder == null ? new LibraryOptions() : collectionFolder.GetLibraryOptions();
-
-            return options;
+            // List.Find is more performant than FirstOrDefault due to enumerator allocation
+            return GetCollectionFolders(item)
+                .Find(folder => folder is CollectionFolder) is CollectionFolder collectionFolder2
+                ? collectionFolder2.GetLibraryOptions()
+                : new LibraryOptions();
         }
 
-        public string GetContentType(BaseItem item)
+        public CollectionType? GetContentType(BaseItem item)
         {
-            string configuredContentType = GetConfiguredContentType(item, false);
-            if (!string.IsNullOrEmpty(configuredContentType))
+            var configuredContentType = GetConfiguredContentType(item, false);
+            if (configuredContentType is not null)
             {
                 return configuredContentType;
             }
+
             configuredContentType = GetConfiguredContentType(item, true);
-            if (!string.IsNullOrEmpty(configuredContentType))
+            if (configuredContentType is not null)
             {
                 return configuredContentType;
             }
+
             return GetInheritedContentType(item);
         }
 
-        public string GetInheritedContentType(BaseItem item)
+        public CollectionType? GetInheritedContentType(BaseItem item)
         {
             var type = GetTopFolderContentType(item);
 
-            if (!string.IsNullOrEmpty(type))
+            if (type is not null)
             {
                 return type;
             }
 
             return item.GetParents()
                 .Select(GetConfiguredContentType)
-                .LastOrDefault(i => !string.IsNullOrEmpty(i));
+                .LastOrDefault(i => i is not null);
         }
 
-        public string GetConfiguredContentType(BaseItem item)
+        public CollectionType? GetConfiguredContentType(BaseItem item)
         {
             return GetConfiguredContentType(item, false);
         }
 
-        public string GetConfiguredContentType(string path)
+        public CollectionType? GetConfiguredContentType(string path)
         {
             return GetContentTypeOverride(path, false);
         }
 
-        public string GetConfiguredContentType(BaseItem item, bool inheritConfiguredPath)
+        public CollectionType? GetConfiguredContentType(BaseItem item, bool inheritConfiguredPath)
         {
-            var collectionFolder = item as ICollectionFolder;
-            if (collectionFolder != null)
+            if (item is ICollectionFolder collectionFolder)
             {
                 return collectionFolder.CollectionType;
             }
+
             return GetContentTypeOverride(item.ContainingFolderPath, inheritConfiguredPath);
         }
 
-        private string GetContentTypeOverride(string path, bool inherit)
+        private CollectionType? GetContentTypeOverride(string path, bool inherit)
         {
-            var nameValuePair = ConfigurationManager.Configuration.ContentTypes.FirstOrDefault(i => _fileSystem.AreEqual(i.Name, path) || (inherit && !string.IsNullOrEmpty(i.Name) && _fileSystem.ContainsSubPath(i.Name, path)));
-            if (nameValuePair != null)
+            var nameValuePair = _configurationManager.Configuration.ContentTypes
+                                    .FirstOrDefault(i => _fileSystem.AreEqual(i.Name, path)
+                                                         || (inherit && !string.IsNullOrEmpty(i.Name)
+                                                                     && _fileSystem.ContainsSubPath(i.Name, path)));
+            if (Enum.TryParse<CollectionType>(nameValuePair?.Value, out var collectionType))
             {
-                return nameValuePair.Value;
+                return collectionType;
             }
+
             return null;
         }
 
-        private string GetTopFolderContentType(BaseItem item)
+        private CollectionType? GetTopFolderContentType(BaseItem item)
         {
-            if (item == null)
+            if (item is null)
             {
                 return null;
             }
 
-            while (!item.ParentId.Equals(Guid.Empty))
+            while (!item.ParentId.IsEmpty())
             {
                 var parent = item.GetParent();
-                if (parent == null || parent is AggregateFolder)
+                if (parent is null || parent is AggregateFolder)
                 {
                     break;
                 }
+
                 item = parent;
             }
 
@@ -2090,43 +2987,44 @@ namespace Emby.Server.Implementations.Library
                 .OfType<ICollectionFolder>()
                 .Where(i => string.Equals(i.Path, item.Path, StringComparison.OrdinalIgnoreCase) || i.PhysicalLocations.Contains(item.Path))
                 .Select(i => i.CollectionType)
-                .FirstOrDefault(i => !string.IsNullOrEmpty(i));
+                .FirstOrDefault(i => i is not null);
         }
 
-        private readonly TimeSpan _viewRefreshInterval = TimeSpan.FromHours(24);
-        //private readonly TimeSpan _viewRefreshInterval = TimeSpan.FromMinutes(1);
-
-        public UserView GetNamedView(User user,
+        public UserView GetNamedView(
+            User user,
             string name,
-            string viewType,
+            CollectionType? viewType,
             string sortName)
         {
             return GetNamedView(user, name, Guid.Empty, viewType, sortName);
         }
 
-        public UserView GetNamedView(string name,
-            string viewType,
+        public UserView GetNamedView(
+            string name,
+            CollectionType viewType,
             string sortName)
         {
-            var path = Path.Combine(ConfigurationManager.ApplicationPaths.InternalMetadataPath, "views");
+            var path = Path.Combine(
+                _configurationManager.ApplicationPaths.InternalMetadataPath,
+                "views",
+                _fileSystem.GetValidFilename(viewType.ToString()));
 
-            path = Path.Combine(path, _fileSystem.GetValidFilename(viewType));
-
-            var id = GetNewItemId(path + "_namedview_" + name, typeof(UserView));
+            // The display name is localized, so it must not take part in the id.
+            var id = GetNewItemId(path + "_namedview_" + viewType.ToString(), typeof(UserView));
 
             var item = GetItemById(id) as UserView;
 
             var refresh = false;
 
-            if (item == null || !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase))
+            if (item is null || !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase))
             {
-                Directory.CreateDirectory(path);
-
+                var info = Directory.CreateDirectory(path);
                 item = new UserView
                 {
                     Path = path,
                     Id = id,
-                    DateCreated = DateTime.UtcNow,
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc,
                     Name = name,
                     ViewType = viewType,
                     ForcedSortName = sortName
@@ -2136,91 +3034,110 @@ namespace Emby.Server.Implementations.Library
 
                 refresh = true;
             }
+            else if (!string.Equals(item.Name, name, StringComparison.Ordinal))
+            {
+                item.Name = name;
+                item.ForcedSortName = sortName;
+
+                refresh = true;
+            }
 
             if (refresh)
             {
-                item.UpdateToRepository(ItemUpdateType.MetadataImport, CancellationToken.None);
-                _providerManagerFactory().QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem)), RefreshPriority.Normal);
+                item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, CancellationToken.None).GetAwaiter().GetResult();
+                ProviderManager.QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), RefreshPriority.Normal);
             }
 
             return item;
         }
 
-        public UserView GetNamedView(User user,
+        public UserView GetNamedView(
+            User user,
             string name,
             Guid parentId,
-            string viewType,
+            CollectionType? viewType,
             string sortName)
         {
-            var parentIdString = parentId.Equals(Guid.Empty) ? null : parentId.ToString("N");
-            var idValues = "38_namedview_" + name + user.Id.ToString("N") + (parentIdString ?? string.Empty) + (viewType ?? string.Empty);
+            var id = GetNamedViewId(user, parentId, viewType);
 
-            var id = GetNewItemId(idValues, typeof(UserView));
-
-            var path = Path.Combine(ConfigurationManager.ApplicationPaths.InternalMetadataPath, "views", id.ToString("N"));
+            var path = Path.Combine(_configurationManager.ApplicationPaths.InternalMetadataPath, "views", id.ToString("N", CultureInfo.InvariantCulture));
 
             var item = GetItemById(id) as UserView;
 
             var isNew = false;
 
-            if (item == null)
+            if (item is null)
             {
-                Directory.CreateDirectory(path);
-
+                var info = Directory.CreateDirectory(path);
                 item = new UserView
                 {
                     Path = path,
                     Id = id,
-                    DateCreated = DateTime.UtcNow,
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc,
                     Name = name,
                     ViewType = viewType,
                     ForcedSortName = sortName,
-                    UserId = user.Id
+                    UserId = user.Id,
+                    DisplayParentId = parentId
                 };
-
-                item.DisplayParentId = parentId;
 
                 CreateItem(item, null);
 
                 isNew = true;
             }
+            else if (!string.Equals(item.Name, name, StringComparison.Ordinal))
+            {
+                item.Name = name;
+                item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
+            }
 
-            var refresh = isNew || DateTime.UtcNow - item.DateLastRefreshed >= _viewRefreshInterval;
+            var lastRefreshedUtc = item.DateLastRefreshed;
+            var refresh = isNew || DateTime.UtcNow - lastRefreshedUtc >= _viewRefreshInterval;
 
-            if (!refresh && !item.DisplayParentId.Equals(Guid.Empty))
+            if (!refresh && !item.DisplayParentId.IsEmpty())
             {
                 var displayParent = GetItemById(item.DisplayParentId);
-                refresh = displayParent != null && displayParent.DateLastSaved > item.DateLastRefreshed;
+                refresh = displayParent is not null && displayParent.DateLastSaved > lastRefreshedUtc;
             }
 
             if (refresh)
             {
-                _providerManagerFactory().QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem))
-                {
-                    // Need to force save to increment DateLastSaved
-                    ForceSave = true
-
-                }, RefreshPriority.Normal);
+                ProviderManager.QueueRefresh(
+                    item.Id,
+                    new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                    {
+                        // Need to force save to increment DateLastSaved
+                        ForceSave = true
+                    },
+                    RefreshPriority.Normal);
             }
 
             return item;
         }
 
-        public UserView GetShadowView(BaseItem parent,
-        string viewType,
-        string sortName)
+        public Guid GetNamedViewId(User user, Guid parentId, CollectionType? viewType)
         {
-            if (parent == null)
-            {
-                throw new ArgumentNullException(nameof(parent));
-            }
+            var parentIdString = parentId.IsEmpty()
+                ? null
+                : parentId.ToString("N", CultureInfo.InvariantCulture);
+
+            // The name is either localized (grouped views) or the library folder's own name.
+            var idValues = "38_namedview_" + user.Id.ToString("N", CultureInfo.InvariantCulture) + (parentIdString ?? string.Empty) + (viewType?.ToString() ?? string.Empty);
+
+            return GetNewItemId(idValues, typeof(UserView));
+        }
+
+        public UserView GetShadowView(
+            BaseItem parent,
+            CollectionType? viewType,
+            string sortName)
+        {
+            ArgumentNullException.ThrowIfNull(parent);
 
             var name = parent.Name;
             var parentId = parent.Id;
-
-            var idValues = "38_namedview_" + name + parentId + (viewType ?? string.Empty);
-
-            var id = GetNewItemId(idValues, typeof(UserView));
+            var id = GetShadowViewId(name, parentId, viewType);
 
             var path = parent.Path;
 
@@ -2228,61 +3145,70 @@ namespace Emby.Server.Implementations.Library
 
             var isNew = false;
 
-            if (item == null)
+            if (item is null)
             {
-                Directory.CreateDirectory(path);
-
+                var info = Directory.CreateDirectory(path);
                 item = new UserView
                 {
                     Path = path,
                     Id = id,
-                    DateCreated = DateTime.UtcNow,
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc,
                     Name = name,
                     ViewType = viewType,
-                    ForcedSortName = sortName
+                    ForcedSortName = sortName,
+                    DisplayParentId = parentId
                 };
-
-                item.DisplayParentId = parentId;
 
                 CreateItem(item, null);
 
                 isNew = true;
             }
 
-            var refresh = isNew || DateTime.UtcNow - item.DateLastRefreshed >= _viewRefreshInterval;
+            var lastRefreshedUtc = item.DateLastRefreshed;
+            var refresh = isNew || DateTime.UtcNow - lastRefreshedUtc >= _viewRefreshInterval;
 
-            if (!refresh && !item.DisplayParentId.Equals(Guid.Empty))
+            if (!refresh && !item.DisplayParentId.IsEmpty())
             {
                 var displayParent = GetItemById(item.DisplayParentId);
-                refresh = displayParent != null && displayParent.DateLastSaved > item.DateLastRefreshed;
+                refresh = displayParent is not null && displayParent.DateLastSaved > lastRefreshedUtc;
             }
 
             if (refresh)
             {
-                _providerManagerFactory().QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem))
-                {
-                    // Need to force save to increment DateLastSaved
-                    ForceSave = true
-
-                }, RefreshPriority.Normal);
+                ProviderManager.QueueRefresh(
+                    item.Id,
+                    new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                    {
+                        // Need to force save to increment DateLastSaved
+                        ForceSave = true
+                    },
+                    RefreshPriority.Normal);
             }
 
             return item;
         }
 
-        public UserView GetNamedView(string name,
+        public Guid GetShadowViewId(string name, Guid parentId, CollectionType? viewType)
+        {
+            var idValues = "38_namedview_" + name + parentId + (viewType?.ToString() ?? string.Empty);
+
+            return GetNewItemId(idValues, typeof(UserView));
+        }
+
+        public UserView GetNamedView(
+            string name,
             Guid parentId,
-            string viewType,
+            CollectionType? viewType,
             string sortName,
             string uniqueId)
         {
-            if (string.IsNullOrEmpty(name))
-            {
-                throw new ArgumentNullException(nameof(name));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(name);
 
-            var parentIdString = parentId.Equals(Guid.Empty) ? null : parentId.ToString("N");
-            var idValues = "37_namedview_" + name + (parentIdString ?? string.Empty) + (viewType ?? string.Empty);
+            var parentIdString = parentId.IsEmpty()
+                ? null
+                : parentId.ToString("N", CultureInfo.InvariantCulture);
+            var idValues = "37_namedview_" + (parentIdString ?? string.Empty) + (viewType?.ToString() ?? string.Empty);
             if (!string.IsNullOrEmpty(uniqueId))
             {
                 idValues += uniqueId;
@@ -2290,117 +3216,128 @@ namespace Emby.Server.Implementations.Library
 
             var id = GetNewItemId(idValues, typeof(UserView));
 
-            var path = Path.Combine(ConfigurationManager.ApplicationPaths.InternalMetadataPath, "views", id.ToString("N"));
+            var path = Path.Combine(_configurationManager.ApplicationPaths.InternalMetadataPath, "views", id.ToString("N", CultureInfo.InvariantCulture));
 
             var item = GetItemById(id) as UserView;
 
             var isNew = false;
 
-            if (item == null)
+            if (item is null)
             {
-                Directory.CreateDirectory(path);
-
+                var info = Directory.CreateDirectory(path);
                 item = new UserView
                 {
                     Path = path,
                     Id = id,
-                    DateCreated = DateTime.UtcNow,
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc,
                     Name = name,
                     ViewType = viewType,
-                    ForcedSortName = sortName
+                    ForcedSortName = sortName,
+                    DisplayParentId = parentId
                 };
-
-                item.DisplayParentId = parentId;
 
                 CreateItem(item, null);
 
                 isNew = true;
             }
 
-            if (!string.Equals(viewType, item.ViewType, StringComparison.OrdinalIgnoreCase))
+            if (viewType != item.ViewType || !string.Equals(item.Name, name, StringComparison.Ordinal))
             {
                 item.ViewType = viewType;
-                item.UpdateToRepository(ItemUpdateType.MetadataEdit, CancellationToken.None);
+                item.Name = name;
+                item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).GetAwaiter().GetResult();
             }
 
-            var refresh = isNew || DateTime.UtcNow - item.DateLastRefreshed >= _viewRefreshInterval;
+            var lastRefreshedUtc = item.DateLastRefreshed;
+            var refresh = isNew || DateTime.UtcNow - lastRefreshedUtc >= _viewRefreshInterval;
 
-            if (!refresh && !item.DisplayParentId.Equals(Guid.Empty))
+            if (!refresh && !item.DisplayParentId.IsEmpty())
             {
                 var displayParent = GetItemById(item.DisplayParentId);
-                refresh = displayParent != null && displayParent.DateLastSaved > item.DateLastRefreshed;
+                refresh = displayParent is not null && displayParent.DateLastSaved > lastRefreshedUtc;
             }
 
             if (refresh)
             {
-                _providerManagerFactory().QueueRefresh(item.Id, new MetadataRefreshOptions(new DirectoryService(_logger, _fileSystem))
-                {
-                    // Need to force save to increment DateLastSaved
-                    ForceSave = true
-                }, RefreshPriority.Normal);
+                ProviderManager.QueueRefresh(
+                    item.Id,
+                    new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                    {
+                        // Need to force save to increment DateLastSaved
+                        ForceSave = true
+                    },
+                    RefreshPriority.Normal);
             }
 
             return item;
         }
 
-        public void AddExternalSubtitleStreams(List<MediaStream> streams,
-            string videoPath,
-            string[] files)
+        public BaseItem GetParentItem(Guid? parentId, Guid? userId)
         {
-            new SubtitleResolver(BaseItem.LocalizationManager, _fileSystem).AddExternalSubtitleStreams(streams, videoPath, streams.Count, files);
+            if (parentId.HasValue)
+            {
+                return GetItemById(parentId.Value) ?? throw new ArgumentException($"Invalid parent id: {parentId.Value}");
+            }
+
+            if (!userId.IsNullOrEmpty())
+            {
+                return GetUserRootFolder();
+            }
+
+            return RootFolder;
         }
 
-        public bool IsVideoFile(string path, LibraryOptions libraryOptions)
+        /// <inheritdoc />
+        public void QueueLibraryScan()
         {
-            var resolver = new VideoResolver(GetNamingOptions());
-            return resolver.IsVideoFile(path);
+            _taskManager.QueueScheduledTask<RefreshMediaLibraryTask>();
         }
 
-        public bool IsVideoFile(string path)
+        /// <inheritdoc />
+        public int? GetSeasonNumberFromPath(string path, Guid? parentId)
         {
-            return IsVideoFile(path, new LibraryOptions());
+            var parentPath = parentId.HasValue ? GetItemById(parentId.Value)?.ContainingFolderPath : null;
+            return SeasonPathParser.Parse(path, parentPath, true, true).SeasonNumber;
         }
 
-        public bool IsAudioFile(string path, LibraryOptions libraryOptions)
-        {
-            var parser = new AudioFileParser(GetNamingOptions());
-            return parser.IsAudioFile(path);
-        }
-
-        public bool IsAudioFile(string path)
-        {
-            return IsAudioFile(path, new LibraryOptions());
-        }
-
-        public int? GetSeasonNumberFromPath(string path)
-        {
-            return new SeasonPathParser(GetNamingOptions()).Parse(path, true, true).SeasonNumber;
-        }
-
+        /// <inheritdoc />
         public bool FillMissingEpisodeNumbersFromPath(Episode episode, bool forceRefresh)
         {
             var series = episode.Series;
-            bool? isAbsoluteNaming = series == null ? false : string.Equals(series.DisplayOrder, "absolute", StringComparison.OrdinalIgnoreCase);
+            bool? isAbsoluteNaming = series is not null && string.Equals(series.DisplayOrder, "absolute", StringComparison.OrdinalIgnoreCase);
             if (!isAbsoluteNaming.Value)
             {
                 // In other words, no filter applied
                 isAbsoluteNaming = null;
             }
 
-            var resolver = new EpisodeResolver(GetNamingOptions());
+            var resolver = new EpisodeResolver(_namingOptions);
 
             var isFolder = episode.VideoType == VideoType.BluRay || episode.VideoType == VideoType.Dvd;
 
-            var episodeInfo = episode.IsFileProtocol ?
-                resolver.Resolve(episode.Path, isFolder, null, null, isAbsoluteNaming) :
-                new Naming.TV.EpisodeInfo();
-
-            if (episodeInfo == null)
+            EpisodeInfo? episodeInfo = null;
+            if (episode.IsFileProtocol)
             {
-                episodeInfo = new Naming.TV.EpisodeInfo();
+                episodeInfo = resolver.Resolve(episode.Path, isFolder, null, null, isAbsoluteNaming);
+                // Resolve from parent folder if it's not the Season folder
+                var parent = episode.GetParent();
+                if (episodeInfo is null && parent.GetType() == typeof(Folder))
+                {
+                    episodeInfo = resolver.Resolve(parent.Path, true, null, null, isAbsoluteNaming);
+                    if (episodeInfo is not null)
+                    {
+                        // add the container
+                        episodeInfo.Container = Path.GetExtension(episode.Path)?.TrimStart('.');
+                    }
+                }
             }
 
             var changed = false;
+            if (episodeInfo is null)
+            {
+                return changed;
+            }
 
             if (episodeInfo.IsByDate)
             {
@@ -2429,11 +3366,11 @@ namespace Emby.Server.Implementations.Library
                     }
                 }
 
-                if (!episode.ProductionYear.HasValue)
+                if (episode.ProductionYear is null)
                 {
                     episode.ProductionYear = episodeInfo.Year;
 
-                    if (episode.ProductionYear.HasValue)
+                    if (episode.ProductionYear is not null)
                     {
                         changed = true;
                     }
@@ -2447,16 +3384,18 @@ namespace Emby.Server.Implementations.Library
                     {
                         changed = true;
                     }
+
                     episode.IndexNumber = episodeInfo.EpisodeNumber;
                 }
 
                 if (!episode.IndexNumberEnd.HasValue || forceRefresh)
                 {
-                    if (episode.IndexNumberEnd != episodeInfo.EndingEpsiodeNumber)
+                    if (episode.IndexNumberEnd != episodeInfo.EndingEpisodeNumber)
                     {
                         changed = true;
                     }
-                    episode.IndexNumberEnd = episodeInfo.EndingEpsiodeNumber;
+
+                    episode.IndexNumberEnd = episodeInfo.EndingEpisodeNumber;
                 }
 
                 if (!episode.ParentIndexNumber.HasValue || forceRefresh)
@@ -2465,6 +3404,7 @@ namespace Emby.Server.Implementations.Library
                     {
                         changed = true;
                     }
+
                     episode.ParentIndexNumber = episodeInfo.SeasonNumber;
                 }
             }
@@ -2473,7 +3413,7 @@ namespace Emby.Server.Implementations.Library
             {
                 var season = episode.Season;
 
-                if (season != null)
+                if (season is not null)
                 {
                     episode.ParentIndexNumber = season.IndexNumber;
                 }
@@ -2487,264 +3427,232 @@ namespace Emby.Server.Implementations.Library
             return changed;
         }
 
-        public NamingOptions GetNamingOptions()
-        {
-            return GetNamingOptionsInternal();
-        }
-
-        private NamingOptions _namingOptions;
-        private string[] _videoFileExtensions;
-        private NamingOptions GetNamingOptionsInternal()
-        {
-            if (_namingOptions == null)
-            {
-                var options = new NamingOptions();
-
-                _namingOptions = options;
-                _videoFileExtensions = _namingOptions.VideoFileExtensions.ToArray();
-            }
-
-            return _namingOptions;
-        }
-
         public ItemLookupInfo ParseName(string name)
         {
-            var resolver = new VideoResolver(GetNamingOptions());
-
-            var result = resolver.CleanDateTime(name);
-            var cleanName = resolver.CleanString(result.Name);
+            var namingOptions = _namingOptions;
+            var result = VideoResolver.CleanDateTime(name, namingOptions);
 
             return new ItemLookupInfo
             {
-                Name = cleanName.Name,
+                Name = VideoResolver.TryCleanString(result.Name, namingOptions, out var newName) ? newName : result.Name,
                 Year = result.Year
             };
         }
 
-        public IEnumerable<Video> FindTrailers(BaseItem owner, List<FileSystemMetadata> fileSystemChildren, IDirectoryService directoryService)
+        public IEnumerable<BaseItem> FindExtras(BaseItem owner, IReadOnlyList<FileSystemMetadata> fileSystemChildren, IDirectoryService directoryService)
         {
-            var namingOptions = GetNamingOptions();
-
-            var files = owner.IsInMixedFolder ? new List<FileSystemMetadata>() : fileSystemChildren.Where(i => i.IsDirectory)
-                .Where(i => string.Equals(i.Name, BaseItem.TrailerFolderName, StringComparison.OrdinalIgnoreCase))
-                .SelectMany(i => _fileSystem.GetFiles(i.FullName, _videoFileExtensions, false, false))
-                .ToList();
-
-            var videoListResolver = new VideoListResolver(namingOptions);
-
-            var videos = videoListResolver.Resolve(fileSystemChildren);
-
-            var currentVideo = videos.FirstOrDefault(i => string.Equals(owner.Path, i.Files.First().Path, StringComparison.OrdinalIgnoreCase));
-
-            if (currentVideo != null)
+            // Apply .ignore rules
+            var filtered = fileSystemChildren.Where(c => !_dotIgnoreIgnoreRule.ShouldIgnore(c, owner)).ToList();
+            var isFolder = owner.IsFolder || (owner is Video video && (video.VideoType == VideoType.BluRay || video.VideoType == VideoType.Dvd));
+            var ownerVideoInfo = VideoResolver.Resolve(owner.Path, isFolder, _namingOptions, libraryRoot: owner.ContainingFolderPath);
+            if (ownerVideoInfo is null)
             {
-                files.AddRange(currentVideo.Extras.Where(i => string.Equals(i.ExtraType, "trailer", StringComparison.OrdinalIgnoreCase)).Select(i => _fileSystem.GetFileInfo(i.Path)));
+                return [];
             }
 
-            var resolvers = new IItemResolver[]
+            var candidates = new List<ExtraCandidate>();
+
+            var count = filtered.Count;
+            for (var i = 0; i < count; i++)
             {
-                new GenericVideoResolver<Trailer>(this, _fileSystem)
-            };
-
-            return ResolvePaths(files, directoryService, null, new LibraryOptions(), null, resolvers)
-                .OfType<Trailer>()
-                .Select(video =>
+                var current = filtered[i];
+                if (current.IsDirectory && _namingOptions.AllExtrasTypesFolderNames.ContainsKey(current.Name))
                 {
-                    // Try to retrieve it from the db. If we don't find it, use the resolved version
-                    var dbItem = GetItemById(video.Id) as Trailer;
+                    var filesInSubFolder = _fileSystem.GetFiles(current.FullName, null, false, false);
+                    var filesInSubFolderList = filesInSubFolder.ToList();
 
-                    if (dbItem != null)
+                    bool subFolderIsMixedFolder = filesInSubFolderList.Count > 1;
+
+                    foreach (var file in filesInSubFolderList)
                     {
-                        video = dbItem;
-                    }
-
-                    video.ParentId = Guid.Empty;
-                    video.OwnerId = owner.Id;
-                    video.ExtraType = ExtraType.Trailer;
-                    video.TrailerTypes = new[] { TrailerType.LocalTrailer };
-
-                    return video;
-
-                    // Sort them so that the list can be easily compared for changes
-                }).OrderBy(i => i.Path);
-        }
-
-        private static readonly string[] ExtrasSubfolderNames = new[] { "extras", "specials", "shorts", "scenes", "featurettes", "behind the scenes", "deleted scenes", "interviews" };
-
-        public IEnumerable<Video> FindExtras(BaseItem owner, List<FileSystemMetadata> fileSystemChildren, IDirectoryService directoryService)
-        {
-            var namingOptions = GetNamingOptions();
-
-            var files = owner.IsInMixedFolder ? new List<FileSystemMetadata>() : fileSystemChildren.Where(i => i.IsDirectory)
-                .Where(i => ExtrasSubfolderNames.Contains(i.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase))
-                .SelectMany(i => _fileSystem.GetFiles(i.FullName, _videoFileExtensions, false, false))
-                .ToList();
-
-            var videoListResolver = new VideoListResolver(namingOptions);
-
-            var videos = videoListResolver.Resolve(fileSystemChildren);
-
-            var currentVideo = videos.FirstOrDefault(i => string.Equals(owner.Path, i.Files.First().Path, StringComparison.OrdinalIgnoreCase));
-
-            if (currentVideo != null)
-            {
-                files.AddRange(currentVideo.Extras.Where(i => !string.Equals(i.ExtraType, "trailer", StringComparison.OrdinalIgnoreCase)).Select(i => _fileSystem.GetFileInfo(i.Path)));
-            }
-
-            return ResolvePaths(files, directoryService, null, new LibraryOptions(), null)
-                .OfType<Video>()
-                .Select(video =>
-                {
-                    // Try to retrieve it from the db. If we don't find it, use the resolved version
-                    var dbItem = GetItemById(video.Id) as Video;
-
-                    if (dbItem != null)
-                    {
-                        video = dbItem;
-                    }
-
-                    video.ParentId = Guid.Empty;
-                    video.OwnerId = owner.Id;
-
-                    SetExtraTypeFromFilename(video);
-
-                    return video;
-
-                    // Sort them so that the list can be easily compared for changes
-                }).OrderBy(i => i.Path);
-        }
-
-        public string GetPathAfterNetworkSubstitution(string path, BaseItem ownerItem)
-        {
-            if (ownerItem != null)
-            {
-                var libraryOptions = GetLibraryOptions(ownerItem);
-                if (libraryOptions != null)
-                {
-                    foreach (var pathInfo in libraryOptions.PathInfos)
-                    {
-                        if (string.IsNullOrWhiteSpace(pathInfo.Path) || string.IsNullOrWhiteSpace(pathInfo.NetworkPath))
+                        if (!_extraResolver.TryGetExtraTypeForOwner(file.FullName, ownerVideoInfo, out var extraType, out var extraRule))
                         {
                             continue;
                         }
 
-                        var substitutionResult = SubstitutePathInternal(path, pathInfo.Path, pathInfo.NetworkPath);
-                        if (substitutionResult.Item2)
-                        {
-                            return substitutionResult.Item1;
-                        }
+                        AddCandidate(file, extraType.Value, extraRule, subFolderIsMixedFolder);
                     }
                 }
-            }
-
-            var metadataPath = ConfigurationManager.Configuration.MetadataPath;
-            var metadataNetworkPath = ConfigurationManager.Configuration.MetadataNetworkPath;
-
-            if (!string.IsNullOrWhiteSpace(metadataPath) && !string.IsNullOrWhiteSpace(metadataNetworkPath))
-            {
-                var metadataSubstitutionResult = SubstitutePathInternal(path, metadataPath, metadataNetworkPath);
-                if (metadataSubstitutionResult.Item2)
+                else if (!current.IsDirectory && _extraResolver.TryGetExtraTypeForOwner(current.FullName, ownerVideoInfo, out var extraType, out var extraRule))
                 {
-                    return metadataSubstitutionResult.Item1;
+                    AddCandidate(current, extraType.Value, extraRule, false);
                 }
             }
 
-            foreach (var map in ConfigurationManager.Configuration.PathSubstitutions)
+            var extras = new List<BaseItem>();
+            var typeCounters = new Dictionary<ExtraType, int>();
+            var generatedNames = new Dictionary<ExtraType, HashSet<string>>();
+
+            // Order by path so that the numbering handed out below does not depend on the
+            // order the file system happened to list the folder in
+            foreach (var candidate in candidates.OrderBy(c => c.Extra.Path, StringComparer.Ordinal))
             {
-                if (!string.IsNullOrWhiteSpace(map.From))
+                var extra = PrepareExtra(candidate);
+                if (extra is not null)
                 {
-                    var substitutionResult = SubstitutePathInternal(path, map.From, map.To);
-                    if (substitutionResult.Item2)
+                    extras.Add(extra);
+                }
+            }
+
+            return extras;
+
+            void AddCandidate(FileSystemMetadata file, ExtraType extraType, ExtraRule extraRule, bool isInMixedFolder)
+            {
+                var extra = ResolvePath(_fileSystem.GetFileInfo(file.FullName), directoryService, _extraResolver.GetResolversForExtraType(extraType));
+                if (extra is Video or Audio)
+                {
+                    candidates.Add(new ExtraCandidate(extra, extraType, extraRule, isInMixedFolder));
+                }
+            }
+
+            BaseItem? PrepareExtra(ExtraCandidate candidate)
+            {
+                var resolved = candidate.Extra;
+                var extra = resolved;
+                var name = GetExtraName(candidate, ownerVideoInfo, typeCounters);
+
+                // Try to retrieve it from the db. If we don't find it, use the resolved version
+                var itemById = GetItemById(extra.Id);
+                if (itemById is not null)
+                {
+                    extra = itemById;
+                }
+
+                // The name derived from the file is only a default. A name that came from anywhere else,
+                // such as a local metadata file, is the user's and has to survive the scan, so only a
+                // name this method handed out itself is renewed; RefreshExtras persists the change.
+                if (!string.IsNullOrEmpty(name)
+                    && extra.LockedFields?.Contains(MetadataField.Name) != true
+                    && (itemById is null || IsGeneratedExtraName(extra.Name, candidate)))
+                {
+                    extra.Name = name;
+                }
+
+                // Only update extra type if it is more specific then the currently known extra type
+                if (extra.ExtraType is null or ExtraType.Unknown || candidate.ExtraType != ExtraType.Unknown)
+                {
+                    extra.ExtraType = candidate.ExtraType;
+                }
+
+                // Only return items that are actual extras (have ExtraType set)
+                // Note: OwnerId and ParentId are set by RefreshExtras, not here,
+                // so that RefreshExtras can detect when they need updating and set ForceSave.
+                if (extra.ExtraType is not null)
+                {
+                    extra.IsInMixedFolder = candidate.IsInMixedFolder;
+                    return extra;
+                }
+
+                return null;
+            }
+
+            bool IsGeneratedExtraName(string currentName, ExtraCandidate candidate)
+            {
+                // The file name is what an extra was called before it was given a name of its type
+                if (string.Equals(currentName, candidate.Extra.Name, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                if (!generatedNames.TryGetValue(candidate.ExtraType, out var names))
+                {
+                    // Any of the numbers of this type may have been handed out, as the order the extras
+                    // of a type are numbered in shifts as files appear beside them or are taken away
+                    names = new HashSet<string>(StringComparer.Ordinal);
+                    var count = candidates.Count(c => c.ExtraType == candidate.ExtraType);
+                    for (var seen = 0; seen < count; seen++)
                     {
-                        return substitutionResult.Item1;
+                        names.Add(GetNumberedExtraName(candidate.ExtraType, seen));
                     }
+
+                    generatedNames[candidate.ExtraType] = names;
+                }
+
+                return names.Contains(currentName);
+            }
+        }
+
+        /// <summary>
+        /// Gets the name to give an extra.
+        /// </summary>
+        /// <param name="candidate">The resolved extra.</param>
+        /// <param name="ownerVideoInfo">The naming info of the owner.</param>
+        /// <param name="typeCounters">Number of extras named after their type so far, per type.</param>
+        /// <returns>The name.</returns>
+        private string GetExtraName(ExtraCandidate candidate, VideoFileInfo ownerVideoInfo, Dictionary<ExtraType, int> typeCounters)
+        {
+            var isNamedAfterOwner = candidate.ExtraRule.RuleType switch
+            {
+                ExtraRuleType.Filename => true,
+                ExtraRuleType.Suffix => string.Equals(candidate.Extra.Name, ownerVideoInfo.Name, StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+
+            if (!isNamedAfterOwner)
+            {
+                return candidate.Extra.Name;
+            }
+
+            typeCounters.TryGetValue(candidate.ExtraType, out var seen);
+            typeCounters[candidate.ExtraType] = seen + 1;
+
+            return GetNumberedExtraName(candidate.ExtraType, seen);
+        }
+
+        /// <summary>
+        /// Gets the name given to the n-th extra of a type that is named after its type.
+        /// </summary>
+        /// <param name="extraType">The extra type.</param>
+        /// <param name="seen">Number of extras of the type named before this one.</param>
+        /// <returns>The name.</returns>
+        private string GetNumberedExtraName(ExtraType extraType, int seen)
+        {
+            var typeName = _localization.GetServerLocalizedString(GetExtraTypeNameKey(extraType));
+
+            return seen == 0
+                ? typeName
+                : string.Format(
+                    CultureInfo.InvariantCulture,
+                    _localization.GetServerLocalizedString("NameExtraNumbered"),
+                    typeName,
+                    seen + 1);
+        }
+
+        private static string GetExtraTypeNameKey(ExtraType extraType) => extraType switch
+        {
+            ExtraType.Clip => "NameExtraClip",
+            ExtraType.Trailer => "NameExtraTrailer",
+            ExtraType.BehindTheScenes => "NameExtraBehindTheScenes",
+            ExtraType.DeletedScene => "NameExtraDeletedScene",
+            ExtraType.Interview => "NameExtraInterview",
+            ExtraType.Scene => "NameExtraScene",
+            ExtraType.Sample => "NameExtraSample",
+            ExtraType.ThemeSong => "NameExtraThemeSong",
+            ExtraType.ThemeVideo => "NameExtraThemeVideo",
+            ExtraType.Featurette => "NameExtraFeaturette",
+            ExtraType.Short => "NameExtraShort",
+            _ => "NameExtraUnknown"
+        };
+
+        public string GetPathAfterNetworkSubstitution(string path, BaseItem? ownerItem)
+        {
+            foreach (var map in _configurationManager.Configuration.PathSubstitutions)
+            {
+                if (path.TryReplaceSubPath(map.From, map.To, out var newPath))
+                {
+                    return newPath;
                 }
             }
 
             return path;
         }
 
-        public string SubstitutePath(string path, string from, string to)
+        public IReadOnlyList<PersonInfo> GetPeople(InternalPeopleQuery query)
         {
-            return SubstitutePathInternal(path, from, to).Item1;
+            return _peopleRepository.GetPeople(query).Items;
         }
 
-        private Tuple<string, bool> SubstitutePathInternal(string path, string from, string to)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
-            if (string.IsNullOrWhiteSpace(from))
-            {
-                throw new ArgumentNullException(nameof(from));
-            }
-            if (string.IsNullOrWhiteSpace(to))
-            {
-                throw new ArgumentNullException(nameof(to));
-            }
-
-            from = from.Trim();
-            to = to.Trim();
-
-            var newPath = path.Replace(from, to, StringComparison.OrdinalIgnoreCase);
-            var changed = false;
-
-            if (!string.Equals(newPath, path))
-            {
-                if (to.IndexOf('/') != -1)
-                {
-                    newPath = newPath.Replace('\\', '/');
-                }
-                else
-                {
-                    newPath = newPath.Replace('/', '\\');
-                }
-
-                changed = true;
-            }
-
-            return new Tuple<string, bool>(newPath, changed);
-        }
-
-        private void SetExtraTypeFromFilename(Video item)
-        {
-            var resolver = new ExtraResolver(GetNamingOptions());
-
-            var result = resolver.GetExtraInfo(item.Path);
-
-            if (string.Equals(result.ExtraType, "deletedscene", StringComparison.OrdinalIgnoreCase))
-            {
-                item.ExtraType = ExtraType.DeletedScene;
-            }
-            else if (string.Equals(result.ExtraType, "behindthescenes", StringComparison.OrdinalIgnoreCase))
-            {
-                item.ExtraType = ExtraType.BehindTheScenes;
-            }
-            else if (string.Equals(result.ExtraType, "interview", StringComparison.OrdinalIgnoreCase))
-            {
-                item.ExtraType = ExtraType.Interview;
-            }
-            else if (string.Equals(result.ExtraType, "scene", StringComparison.OrdinalIgnoreCase))
-            {
-                item.ExtraType = ExtraType.Scene;
-            }
-            else if (string.Equals(result.ExtraType, "sample", StringComparison.OrdinalIgnoreCase))
-            {
-                item.ExtraType = ExtraType.Sample;
-            }
-            else
-            {
-                item.ExtraType = ExtraType.Clip;
-            }
-        }
-
-        public List<PersonInfo> GetPeople(InternalPeopleQuery query)
-        {
-            return ItemRepository.GetPeople(query);
-        }
-
-        public List<PersonInfo> GetPeople(BaseItem item)
+        public IReadOnlyList<PersonInfo> GetPeople(BaseItem item)
         {
             if (item.SupportsPeople)
             {
@@ -2759,42 +3667,88 @@ namespace Emby.Server.Implementations.Library
                 }
             }
 
-            return new List<PersonInfo>();
+            return [];
         }
 
-        public List<Person> GetPeopleItems(InternalPeopleQuery query)
+        public QueryResult<BaseItem> GetPeopleItems(InternalPeopleQuery query)
         {
-            return ItemRepository.GetPeopleNames(query).Select(i =>
+            ArgumentNullException.ThrowIfNull(query);
+
+            // This hands back by-name items, so the people without one are not ours to report.
+            query.MustHaveItem = true;
+
+            var queryResult = _peopleRepository.GetPeople(query);
+            var baseItems = queryResult.Items.Select(i =>
+                {
+                    try
+                    {
+                        return GetPerson(i.Name);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "error retrieving BaseItem for person: {0}", i.Name);
+                        return null;
+                    }
+                })
+                .Where(i => i is not null)
+                .Where(i => query.User is null || i!.IsVisible(query.User))
+                .OfType<BaseItem>()
+                .ToList()
+                .AsReadOnly();
+
+            return new QueryResult<BaseItem>
             {
-                try
-                {
-                    return GetPerson(i);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error getting person");
-                    return null;
-                }
-
-            }).Where(i => i != null).ToList();
+                StartIndex = queryResult.StartIndex,
+                TotalRecordCount = queryResult.TotalRecordCount,
+                Items = baseItems,
+            };
         }
 
-        public List<string> GetPeopleNames(InternalPeopleQuery query)
+        public IReadOnlyList<string> GetPeopleNames(InternalPeopleQuery query)
         {
-            return ItemRepository.GetPeopleNames(query);
+            return _peopleRepository.GetPeopleNames(query);
+        }
+
+        /// <inheritdoc/>
+        public int DeleteOrphanedCredits()
+        {
+            return _peopleRepository.DeleteOrphanedCredits();
+        }
+
+        /// <inheritdoc/>
+        public IReadOnlyDictionary<Guid, IReadOnlyList<string>> GetPeopleNamesByItems(IReadOnlyList<Guid> itemIds, IReadOnlyList<string> personTypes)
+        {
+            return _peopleRepository.GetPeopleNamesByItems(itemIds, personTypes);
+        }
+
+        /// <inheritdoc/>
+        public IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>> GetPeopleByItems(IReadOnlyList<Guid> itemIds)
+        {
+            return _peopleRepository.GetPeopleByItems(itemIds);
         }
 
         public void UpdatePeople(BaseItem item, List<PersonInfo> people)
+        {
+            UpdatePeopleAsync(item, people, CancellationToken.None).GetAwaiter().GetResult();
+        }
+
+        /// <inheritdoc />
+        public async Task UpdatePeopleAsync(BaseItem item, IReadOnlyList<PersonInfo> people, CancellationToken cancellationToken)
         {
             if (!item.SupportsPeople)
             {
                 return;
             }
 
-            ItemRepository.UpdatePeople(item.Id, people);
+            if (people is not null)
+            {
+                people = people.Where(e => e is not null).ToArray();
+                _peopleRepository.UpdatePeople(item.Id, people);
+                await SavePeopleMetadataAsync(people, cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        public async Task<ItemImageInfo> ConvertImageToLocal(BaseItem item, ItemImageInfo image, int imageIndex)
+        public async Task<ItemImageInfo> ConvertImageToLocal(BaseItem item, ItemImageInfo image, int imageIndex, bool removeOnFailure)
         {
             foreach (var url in image.Path.Split('|'))
             {
@@ -2802,139 +3756,212 @@ namespace Emby.Server.Implementations.Library
                 {
                     _logger.LogDebug("ConvertImageToLocal item {0} - image url: {1}", item.Id, url);
 
-                    await _providerManagerFactory().SaveImage(item, url, image.Type, imageIndex, CancellationToken.None).ConfigureAwait(false);
+                    await ProviderManager.SaveImage(item, url, image.Type, imageIndex, CancellationToken.None).ConfigureAwait(false);
 
-                    item.UpdateToRepository(ItemUpdateType.ImageUpdate, CancellationToken.None);
+                    await item.UpdateToRepositoryAsync(ItemUpdateType.ImageUpdate, CancellationToken.None).ConfigureAwait(false);
 
-                    return item.GetImageInfo(image.Type, imageIndex);
-                }
-                catch (HttpException ex)
-                {
-                    if (ex.StatusCode.HasValue && ex.StatusCode.Value == HttpStatusCode.NotFound)
+                    var localImage = item.GetImageInfo(image.Type, imageIndex);
+                    if (localImage is null)
                     {
+                        throw new InvalidOperationException(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "Downloaded {0} image {1} from {2} is not attached to {3} ({4})",
+                            image.Type,
+                            imageIndex,
+                            url,
+                            item.Name,
+                            item.Id));
+                    }
+
+                    return localImage;
+                }
+                catch (HttpRequestException ex)
+                {
+                    if (ex.StatusCode.HasValue
+                        && (ex.StatusCode.Value == HttpStatusCode.NotFound || ex.StatusCode.Value == HttpStatusCode.Forbidden))
+                    {
+                        _logger.LogDebug(ex, "Error downloading image {Url}", url);
                         continue;
                     }
+
                     throw;
                 }
             }
 
-            // Remove this image to prevent it from retrying over and over
-            item.RemoveImage(image);
-            item.UpdateToRepository(ItemUpdateType.ImageUpdate, CancellationToken.None);
+            if (removeOnFailure)
+            {
+                // Remove this image to prevent it from retrying over and over
+                item.RemoveImage(image);
+                await item.UpdateToRepositoryAsync(ItemUpdateType.ImageUpdate, CancellationToken.None).ConfigureAwait(false);
+            }
 
-            throw new InvalidOperationException();
+            throw new InvalidOperationException(string.Format(
+                CultureInfo.InvariantCulture,
+                "Unable to convert any {0} image url in \"{1}\" to a local file for {2} ({3})",
+                image.Type,
+                image.Path,
+                item.Name,
+                item.Id));
         }
 
-        public async Task AddVirtualFolder(string name, string collectionType, LibraryOptions options, bool refreshLibrary)
+        public async Task AddVirtualFolder(string name, CollectionTypeOptions? collectionType, LibraryOptions options, bool refreshLibrary)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
                 throw new ArgumentNullException(nameof(name));
             }
 
-            name = _fileSystem.GetValidFilename(name);
+            name = _fileSystem.GetValidFilename(name.Trim());
 
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
 
+            var existingNameCount = 1; // first numbered name will be 2
             var virtualFolderPath = Path.Combine(rootFolderPath, name);
+            var originalName = name;
             while (Directory.Exists(virtualFolderPath))
             {
-                name += "1";
+                existingNameCount++;
+                name = originalName + existingNameCount;
                 virtualFolderPath = Path.Combine(rootFolderPath, name);
             }
 
             var mediaPathInfos = options.PathInfos;
-            if (mediaPathInfos != null)
+            if (mediaPathInfos is not null)
             {
                 var invalidpath = mediaPathInfos.FirstOrDefault(i => !Directory.Exists(i.Path));
-                if (invalidpath != null)
+                if (invalidpath is not null)
                 {
                     throw new ArgumentException("The specified path does not exist: " + invalidpath.Path + ".");
                 }
             }
 
-            _libraryMonitorFactory().Stop();
+            LibraryMonitor.Stop();
 
             try
             {
                 Directory.CreateDirectory(virtualFolderPath);
 
-                if (!string.IsNullOrEmpty(collectionType))
+                if (collectionType is not null)
                 {
-                    var path = Path.Combine(virtualFolderPath, collectionType + ".collection");
+                    var path = Path.Combine(virtualFolderPath, collectionType.ToString()!.ToLowerInvariant() + ".collection"); // Can't be null with legal values?
 
-                    File.WriteAllBytes(path, Array.Empty<byte>());
+                    FileHelper.CreateEmpty(path);
                 }
 
                 CollectionFolder.SaveLibraryOptions(virtualFolderPath, options);
 
-                if (mediaPathInfos != null)
+                if (mediaPathInfos is not null)
                 {
                     foreach (var path in mediaPathInfos)
                     {
                         AddMediaPathInternal(name, path, false);
                     }
                 }
+
+                // The libraries root was listed before this folder existed, so drop that listing:
+                // anything still reading it resolves the library set without the new folder.
+                _directoryService.Invalidate(virtualFolderPath);
             }
             finally
             {
+                await ValidateTopLibraryFolders(CancellationToken.None).ConfigureAwait(false);
+
                 if (refreshLibrary)
                 {
-                    await ValidateTopLibraryFolders(CancellationToken.None).ConfigureAwait(false);
-
-                    StartScanInBackground();
+                    _ = StartScanInBackground();
                 }
                 else
                 {
                     // Need to add a delay here or directory watchers may still pick up the changes
                     await Task.Delay(1000).ConfigureAwait(false);
-                    _libraryMonitorFactory().Start();
+                    LibraryMonitor.Start();
                 }
             }
         }
 
-        private void StartScanInBackground()
+        private async Task SavePeopleMetadataAsync(IEnumerable<PersonInfo> people, CancellationToken cancellationToken)
         {
-            Task.Run(() =>
+            foreach (var person in people)
             {
-                // No need to start if scanning the library because it will handle it
-                ValidateMediaLibrary(new SimpleProgress<double>(), CancellationToken.None);
-            });
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var itemUpdateType = ItemUpdateType.MetadataDownload;
+                var saveEntity = false;
+                var personEntity = GetPerson(person.Name);
+
+                if (personEntity is null)
+                {
+                    try
+                    {
+                        personEntity = GetOrCreatePerson(person.Name);
+                        saveEntity = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to create person {Name}", person.Name);
+                        continue;
+                    }
+                }
+
+                foreach (var id in person.ProviderIds)
+                {
+                    if (!string.Equals(personEntity.GetProviderId(id.Key), id.Value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        personEntity.SetProviderId(id.Key, id.Value);
+                        saveEntity = true;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(person.ImageUrl) && !personEntity.HasImage(ImageType.Primary))
+                {
+                    personEntity.SetImage(
+                        new ItemImageInfo
+                        {
+                            Path = person.ImageUrl,
+                            Type = ImageType.Primary
+                        },
+                        0);
+
+                    saveEntity = true;
+                    itemUpdateType = ItemUpdateType.ImageUpdate;
+                }
+
+                if (saveEntity)
+                {
+                    await RunMetadataSavers(personEntity, itemUpdateType).ConfigureAwait(false);
+                    personEntity.DateLastSaved = DateTime.UtcNow;
+
+                    CreateItems([personEntity], null, CancellationToken.None);
+                }
+            }
         }
 
-        private static bool ValidateNetworkPath(string path)
+        internal Task StartScanInBackground()
         {
-            //if (Environment.OSVersion.Platform == PlatformID.Win32NT)
-            //{
-            //    // We can't validate protocol-based paths, so just allow them
-            //    if (path.IndexOf("://", StringComparison.OrdinalIgnoreCase) == -1)
-            //    {
-            //        return Directory.Exists(path);
-            //    }
-            //}
+            // An active scan already handles library structure changes, so this request can be dropped.
+            if (IsScanRunning)
+            {
+                return Task.CompletedTask;
+            }
 
-            // Without native support for unc, we cannot validate this when running under mono
-            return true;
+            // Queue instead of restarting so a scan that starts after the check is allowed to finish.
+            return Task.Run(QueueLibraryScan);
         }
 
-        private const string ShortcutFileExtension = ".mblink";
-        public void AddMediaPath(string virtualFolderName, MediaPathInfo pathInfo)
+        public void AddMediaPath(string virtualFolderName, MediaPathInfo mediaPath)
         {
-            AddMediaPathInternal(virtualFolderName, pathInfo, true);
+            AddMediaPathInternal(virtualFolderName, mediaPath, true);
         }
 
         private void AddMediaPathInternal(string virtualFolderName, MediaPathInfo pathInfo, bool saveLibraryOptions)
         {
-            if (pathInfo == null)
-            {
-                throw new ArgumentNullException(nameof(pathInfo));
-            }
+            ArgumentNullException.ThrowIfNull(pathInfo);
 
             var path = pathInfo.Path;
 
             if (string.IsNullOrWhiteSpace(path))
             {
-                throw new ArgumentNullException(nameof(path));
+                throw new ArgumentException(nameof(path));
             }
 
             if (!Directory.Exists(path))
@@ -2942,35 +3969,18 @@ namespace Emby.Server.Implementations.Library
                 throw new FileNotFoundException("The path does not exist.");
             }
 
-            if (!string.IsNullOrWhiteSpace(pathInfo.NetworkPath) && !ValidateNetworkPath(pathInfo.NetworkPath))
-            {
-                throw new FileNotFoundException("The network path does not exist.");
-            }
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
+            var virtualFolderPath = FileSystemHelper.GetChildPath(rootFolderPath, virtualFolderName)
+                ?? throw new FileNotFoundException(
+                    string.Format(CultureInfo.InvariantCulture, "The media collection {0} does not exist", virtualFolderName));
 
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
-            var virtualFolderPath = Path.Combine(rootFolderPath, virtualFolderName);
-
-            var shortcutFilename = Path.GetFileNameWithoutExtension(path);
-
-            var lnk = Path.Combine(virtualFolderPath, shortcutFilename + ShortcutFileExtension);
-
-            while (File.Exists(lnk))
-            {
-                shortcutFilename += "1";
-                lnk = Path.Combine(virtualFolderPath, shortcutFilename + ShortcutFileExtension);
-            }
-
-            _fileSystem.CreateShortcut(lnk, _appHost.ReverseVirtualPath(path));
-
-            RemoveContentTypeOverrides(path);
+            CreateShortcut(virtualFolderPath, pathInfo);
 
             if (saveLibraryOptions)
             {
                 var libraryOptions = CollectionFolder.GetLibraryOptions(virtualFolderPath);
 
-                var list = libraryOptions.PathInfos.ToList();
-                list.Add(pathInfo);
-                libraryOptions.PathInfos = list.ToArray();
+                libraryOptions.PathInfos = [.. libraryOptions.PathInfos, pathInfo];
 
                 SyncLibraryOptionsToLocations(virtualFolderPath, libraryOptions);
 
@@ -2978,36 +3988,18 @@ namespace Emby.Server.Implementations.Library
             }
         }
 
-        public void UpdateMediaPath(string virtualFolderName, MediaPathInfo pathInfo)
+        public void UpdateMediaPath(string virtualFolderName, MediaPathInfo mediaPath)
         {
-            if (pathInfo == null)
-            {
-                throw new ArgumentNullException(nameof(pathInfo));
-            }
+            ArgumentNullException.ThrowIfNull(mediaPath);
 
-            if (!string.IsNullOrWhiteSpace(pathInfo.NetworkPath) && !ValidateNetworkPath(pathInfo.NetworkPath))
-            {
-                throw new FileNotFoundException("The network path does not exist.");
-            }
-
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
-            var virtualFolderPath = Path.Combine(rootFolderPath, virtualFolderName);
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
+            var virtualFolderPath = FileSystemHelper.GetChildPath(rootFolderPath, virtualFolderName)
+                ?? throw new FileNotFoundException(
+                    string.Format(CultureInfo.InvariantCulture, "The media collection {0} does not exist", virtualFolderName));
 
             var libraryOptions = CollectionFolder.GetLibraryOptions(virtualFolderPath);
 
             SyncLibraryOptionsToLocations(virtualFolderPath, libraryOptions);
-
-            var list = libraryOptions.PathInfos.ToList();
-            foreach (var originalPathInfo in list)
-            {
-                if (string.Equals(pathInfo.Path, originalPathInfo.Path, StringComparison.Ordinal))
-                {
-                    originalPathInfo.NetworkPath = pathInfo.NetworkPath;
-                    break;
-                }
-            }
-
-            libraryOptions.PathInfos = list.ToArray();
 
             CollectionFolder.SaveLibraryOptions(virtualFolderPath, libraryOptions);
         }
@@ -3025,10 +4017,7 @@ namespace Emby.Server.Implementations.Library
                 {
                     if (!list.Any(i => string.Equals(i.Path, location, StringComparison.Ordinal)))
                     {
-                        list.Add(new MediaPathInfo
-                        {
-                            Path = location
-                        });
+                        list.Add(new MediaPathInfo(location));
                     }
                 }
 
@@ -3043,20 +4032,21 @@ namespace Emby.Server.Implementations.Library
                 throw new ArgumentNullException(nameof(name));
             }
 
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
 
-            var path = Path.Combine(rootFolderPath, name);
+            var path = FileSystemHelper.GetChildPath(rootFolderPath, name);
 
-            if (!Directory.Exists(path))
+            if (path is null || !Directory.Exists(path))
             {
                 throw new FileNotFoundException("The media folder does not exist");
             }
 
-            _libraryMonitorFactory().Stop();
+            LibraryMonitor.Stop();
 
             try
             {
                 Directory.Delete(path, true);
+                _directoryService.Invalidate(path);
             }
             finally
             {
@@ -3064,15 +4054,15 @@ namespace Emby.Server.Implementations.Library
 
                 if (refreshLibrary)
                 {
-                    await ValidateTopLibraryFolders(CancellationToken.None).ConfigureAwait(false);
+                    await ValidateTopLibraryFolders(CancellationToken.None, true).ConfigureAwait(false);
 
-                    StartScanInBackground();
+                    _ = StartScanInBackground();
                 }
                 else
                 {
                     // Need to add a delay here or directory watchers may still pick up the changes
                     await Task.Delay(1000).ConfigureAwait(false);
-                    _libraryMonitorFactory().Start();
+                    LibraryMonitor.Start();
                 }
             }
         }
@@ -3084,53 +4074,49 @@ namespace Emby.Server.Implementations.Library
                 throw new ArgumentNullException(nameof(path));
             }
 
-            var removeList = new List<NameValuePair>();
+            List<NameValuePair>? removeList = null;
 
-            foreach (var contentType in ConfigurationManager.Configuration.ContentTypes)
+            foreach (var contentType in _configurationManager.Configuration.ContentTypes)
             {
-                if (string.IsNullOrWhiteSpace(contentType.Name))
-                {
-                    removeList.Add(contentType);
-                }
-                else if (_fileSystem.AreEqual(path, contentType.Name)
+                if (string.IsNullOrWhiteSpace(contentType.Name)
+                    || _fileSystem.AreEqual(path, contentType.Name)
                     || _fileSystem.ContainsSubPath(path, contentType.Name))
                 {
-                    removeList.Add(contentType);
+                    (removeList ??= new()).Add(contentType);
                 }
             }
 
-            if (removeList.Count > 0)
+            if (removeList is not null)
             {
-                ConfigurationManager.Configuration.ContentTypes = ConfigurationManager.Configuration.ContentTypes
+                _configurationManager.Configuration.ContentTypes = _configurationManager.Configuration.ContentTypes
                     .Except(removeList)
-                        .ToArray();
+                    .ToArray();
 
-                ConfigurationManager.SaveConfiguration();
+                _configurationManager.SaveConfiguration();
             }
         }
 
         public void RemoveMediaPath(string virtualFolderName, string mediaPath)
         {
-            if (string.IsNullOrEmpty(mediaPath))
-            {
-                throw new ArgumentNullException(nameof(mediaPath));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(mediaPath);
 
-            var rootFolderPath = ConfigurationManager.ApplicationPaths.DefaultUserViewsPath;
-            var virtualFolderPath = Path.Combine(rootFolderPath, virtualFolderName);
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
+            var virtualFolderPath = FileSystemHelper.GetChildPath(rootFolderPath, virtualFolderName);
 
-            if (!Directory.Exists(virtualFolderPath))
+            if (virtualFolderPath is null || !Directory.Exists(virtualFolderPath))
             {
-                throw new FileNotFoundException(string.Format("The media collection {0} does not exist", virtualFolderName));
+                throw new FileNotFoundException(
+                    string.Format(CultureInfo.InvariantCulture, "The media collection {0} does not exist", virtualFolderName));
             }
 
             var shortcut = _fileSystem.GetFilePaths(virtualFolderPath, true)
-                .Where(i => string.Equals(ShortcutFileExtension, Path.GetExtension(i), StringComparison.OrdinalIgnoreCase))
+                .Where(i => Path.GetExtension(i.AsSpan()).Equals(ShortcutFileExtension, StringComparison.OrdinalIgnoreCase))
                 .FirstOrDefault(f => _appHost.ExpandVirtualPath(_fileSystem.ResolveShortcut(f)).Equals(mediaPath, StringComparison.OrdinalIgnoreCase));
 
             if (!string.IsNullOrEmpty(shortcut))
             {
                 _fileSystem.DeleteFile(shortcut);
+                _directoryService.Invalidate(shortcut);
             }
 
             var libraryOptions = CollectionFolder.GetLibraryOptions(virtualFolderPath);
@@ -3142,5 +4128,107 @@ namespace Emby.Server.Implementations.Library
 
             CollectionFolder.SaveLibraryOptions(virtualFolderPath, libraryOptions);
         }
+
+        private static bool ItemIsVisible(BaseItem? item, User? user)
+        {
+            if (item is null)
+            {
+                return false;
+            }
+
+            if (user is null)
+            {
+                return true;
+            }
+
+            return item is UserRootFolder || item.IsVisibleStandalone(user);
+        }
+
+        public void CreateShortcut(string virtualFolderPath, MediaPathInfo pathInfo)
+        {
+            var path = pathInfo.Path;
+            var rootFolderPath = _configurationManager.ApplicationPaths.DefaultUserViewsPath;
+
+            var shortcutFilename = Path.GetFileNameWithoutExtension(path);
+
+            var lnk = Path.Combine(virtualFolderPath, shortcutFilename + ShortcutFileExtension);
+
+            while (File.Exists(lnk))
+            {
+                shortcutFilename += "1";
+                lnk = Path.Combine(virtualFolderPath, shortcutFilename + ShortcutFileExtension);
+            }
+
+            _fileSystem.CreateShortcut(lnk, _appHost.ReverseVirtualPath(path));
+            _directoryService.Invalidate(lnk);
+            RemoveContentTypeOverrides(path);
+        }
+
+        /// <inheritdoc />
+        public async Task RerouteLinkedChildReferencesAsync(Guid fromChildId, Guid toChildId)
+        {
+            var affectedParentIds = _linkedChildrenService.RerouteLinkedChildren(fromChildId, toChildId);
+
+            // Update in-memory LinkedChildren and re-save metadata (NFO) for affected parents
+            foreach (var parentId in affectedParentIds)
+            {
+                if (GetItemById(parentId) is Folder parent)
+                {
+                    foreach (var lc in parent.LinkedChildren)
+                    {
+                        if (lc.ItemId.HasValue && lc.ItemId.Value.Equals(fromChildId))
+                        {
+                            lc.ItemId = toChildId;
+                        }
+                    }
+
+                    await RunMetadataSavers(parent, ItemUpdateType.MetadataEdit).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public QueryFiltersLegacy GetQueryFiltersLegacy(InternalItemsQuery query)
+        {
+            if (query.User is not null)
+            {
+                AddUserToQuery(query, query.User);
+            }
+
+            SetTopParentOrAncestorIds(query);
+            return _itemRepository.GetQueryFiltersLegacy(query);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<string> GetTagNames(InternalItemsQuery query)
+        {
+            if (query.User is not null)
+            {
+                AddUserToQuery(query, query.User);
+            }
+
+            SetTopParentOrAncestorIds(query);
+            return _itemRepository.GetTagNames(query);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<string> GetMediaStreamLanguages(MediaStreamType mediaStreamType)
+        {
+            return _mediaStreamRepository.GetMediaStreamLanguages(mediaStreamType);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<string> GetMediaStreamLanguages(MediaStreamType mediaStreamType, InternalItemsQuery query)
+        {
+            if (query.User is not null)
+            {
+                AddUserToQuery(query, query.User);
+            }
+
+            SetTopParentOrAncestorIds(query);
+            return _itemRepository.GetMediaStreamLanguages(query, mediaStreamType);
+        }
+
+        private sealed record ExtraCandidate(BaseItem Extra, ExtraType ExtraType, ExtraRule ExtraRule, bool IsInMixedFolder);
     }
 }

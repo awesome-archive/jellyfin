@@ -1,27 +1,52 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Emby.Naming.Common;
+using Emby.Naming.Video;
+using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Model.Configuration;
+using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.Resolvers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
 
 namespace Emby.Server.Implementations.Library.Resolvers
 {
+    /// <summary>
+    /// Class PhotoResolver.
+    /// </summary>
     public class PhotoResolver : ItemResolver<Photo>
     {
         private readonly IImageProcessor _imageProcessor;
-        private readonly ILibraryManager _libraryManager;
-        private readonly IFileSystem _fileSystem;
+        private readonly NamingOptions _namingOptions;
+        private readonly IDirectoryService _directoryService;
 
-        public PhotoResolver(IImageProcessor imageProcessor, ILibraryManager libraryManager, IFileSystem fileSystem)
+        private static readonly string[] _ignoreFiles = new[]
+        {
+            "folder",
+            "thumb",
+            "landscape",
+            "fanart",
+            "backdrop",
+            "poster",
+            "cover",
+            "logo",
+            "default"
+        };
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PhotoResolver"/> class.
+        /// </summary>
+        /// <param name="imageProcessor">The image processor.</param>
+        /// <param name="namingOptions">The naming options.</param>
+        /// <param name="directoryService">The directory service.</param>
+        public PhotoResolver(IImageProcessor imageProcessor, NamingOptions namingOptions, IDirectoryService directoryService)
         {
             _imageProcessor = imageProcessor;
-            _libraryManager = libraryManager;
-            _fileSystem = fileSystem;
+            _namingOptions = namingOptions;
+            _directoryService = directoryService;
         }
 
         /// <summary>
@@ -29,27 +54,27 @@ namespace Emby.Server.Implementations.Library.Resolvers
         /// </summary>
         /// <param name="args">The args.</param>
         /// <returns>Trailer.</returns>
-        protected override Photo Resolve(ItemResolveArgs args)
+        protected override Photo? Resolve(ItemResolveArgs args)
         {
             if (!args.IsDirectory)
             {
                 // Must be an image file within a photo collection
-                var collectionType = args.GetCollectionType();
+                var collectionType = args.CollectionType;
 
-                if (string.Equals(collectionType, CollectionType.Photos, StringComparison.OrdinalIgnoreCase) ||
-                    (string.Equals(collectionType, CollectionType.HomeVideos, StringComparison.OrdinalIgnoreCase) && args.GetLibraryOptions().EnablePhotos))
+                if (collectionType == CollectionType.photos
+                    || (collectionType == CollectionType.homevideos && args.LibraryOptions.EnablePhotos))
                 {
                     if (IsImageFile(args.Path, _imageProcessor))
                     {
-                        var filename = Path.GetFileNameWithoutExtension(args.Path);
+                        var filename = Path.GetFileNameWithoutExtension(args.Path.AsSpan());
 
                         // Make sure the image doesn't belong to a video file
-                        var files = args.DirectoryService.GetFiles(Path.GetDirectoryName(args.Path));
-                        var libraryOptions = args.GetLibraryOptions();
+                        var files = _directoryService.GetFiles(Path.GetDirectoryName(args.Path)
+                            ?? throw new InvalidOperationException("Path can't be a root directory."));
 
                         foreach (var file in files)
                         {
-                            if (IsOwnedByMedia(_libraryManager, libraryOptions, file.FullName, filename))
+                            if (IsOwnedByMedia(_namingOptions, file.FullName, filename))
                             {
                                 return null;
                             }
@@ -66,55 +91,32 @@ namespace Emby.Server.Implementations.Library.Resolvers
             return null;
         }
 
-        internal static bool IsOwnedByMedia(ILibraryManager libraryManager, LibraryOptions libraryOptions, string file, string imageFilename)
+        internal static bool IsOwnedByMedia(NamingOptions namingOptions, string file, ReadOnlySpan<char> imageFilename)
         {
-            if (libraryManager.IsVideoFile(file, libraryOptions))
-            {
-                return IsOwnedByResolvedMedia(libraryManager, libraryOptions, file, imageFilename);
-            }
-
-            return false;
+            return VideoResolver.IsVideoFile(file, namingOptions) && IsOwnedByResolvedMedia(file, imageFilename);
         }
 
-        internal static bool IsOwnedByResolvedMedia(ILibraryManager libraryManager, LibraryOptions libraryOptions, string file, string imageFilename)
-        {
-            if (imageFilename.StartsWith(Path.GetFileNameWithoutExtension(file), StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        private static readonly HashSet<string> IgnoreFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "folder",
-            "thumb",
-            "landscape",
-            "fanart",
-            "backdrop",
-            "poster",
-            "cover",
-            "logo",
-            "default"
-        };
+        internal static bool IsOwnedByResolvedMedia(ReadOnlySpan<char> file, ReadOnlySpan<char> imageFilename)
+            => imageFilename.StartsWith(Path.GetFileNameWithoutExtension(file), StringComparison.OrdinalIgnoreCase);
 
         internal static bool IsImageFile(string path, IImageProcessor imageProcessor)
         {
-            var filename = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+            ArgumentNullException.ThrowIfNull(path);
 
-            if (IgnoreFiles.Contains(filename))
+            var extension = Path.GetExtension(path.AsSpan()).TrimStart('.');
+            if (!imageProcessor.SupportedInputFormats.Contains(extension, StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
 
-            if (IgnoreFiles.Any(i => filename.IndexOf(i, StringComparison.OrdinalIgnoreCase) != -1))
+            var filename = Path.GetFileNameWithoutExtension(path);
+
+            if (_ignoreFiles.Any(i => filename.StartsWith(i, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
 
-            return imageProcessor.SupportedInputFormats.Contains((Path.GetExtension(path) ?? string.Empty).TrimStart('.'));
+            return true;
         }
-
     }
 }

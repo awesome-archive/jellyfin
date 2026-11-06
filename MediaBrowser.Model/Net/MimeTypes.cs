@@ -1,348 +1,203 @@
+#pragma warning disable CS1591
+
 using System;
+using System.Collections.Frozen;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using MediaBrowser.Model.Extensions;
+using System.Net.Mime;
+using Jellyfin.Extensions;
 
 namespace MediaBrowser.Model.Net
 {
     /// <summary>
-    /// Class MimeTypes
+    /// Class MimeTypes.
     /// </summary>
+    ///
+    /// <remarks>
+    /// For more information on MIME types:
+    /// <list type="bullet">
+    ///     <item>http://en.wikipedia.org/wiki/Internet_media_type</item>
+    ///     <item>https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types/Common_types</item>
+    ///     <item>http://www.iana.org/assignments/media-types/media-types.xhtml</item>
+    /// </list>
+    /// </remarks>
     public static class MimeTypes
     {
         /// <summary>
-        /// Any extension in this list is considered a video file - can be added to at runtime for extensibility
+        /// Any extension in this list is considered a video file.
         /// </summary>
-        private static readonly string[] VideoFileExtensions = new string[]
-            {
-                ".mkv",
-                ".m2t",
-                ".m2ts",
-                ".img",
-                ".iso",
-                ".mk3d",
-                ".ts",
-                ".rmvb",
-                ".mov",
-                ".avi",
-                ".mpg",
-                ".mpeg",
-                ".wmv",
-                ".mp4",
-                ".divx",
-                ".dvr-ms",
-                ".wtv",
-                ".ogm",
-                ".ogv",
-                ".asf",
-                ".m4v",
-                ".flv",
-                ".f4v",
-                ".3gp",
-                ".webm",
-                ".mts",
-                ".m2v",
-                ".rec"
-        };
-
-        private static Dictionary<string, string> GetVideoFileExtensionsDictionary()
+        private static readonly FrozenSet<string> _videoFileExtensions = new[]
         {
-            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            ".3gp",
+            ".asf",
+            ".avi",
+            ".divx",
+            ".dvr-ms",
+            ".f4v",
+            ".flv",
+            ".img",
+            ".iso",
+            ".m2t",
+            ".m2ts",
+            ".m2v",
+            ".m4v",
+            ".mk3d",
+            ".mkv",
+            ".mov",
+            ".mp4",
+            ".mpg",
+            ".mpeg",
+            ".mts",
+            ".ogg",
+            ".ogm",
+            ".ogv",
+            ".rec",
+            ".ts",
+            ".rmvb",
+            ".vob",
+            ".webm",
+            ".wmv",
+            ".wtv",
+        }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
-            foreach (string ext in VideoFileExtensions)
-            {
-                dict[ext] = ext;
-            }
-
-            return dict;
-        }
-
-        private static readonly Dictionary<string, string> VideoFileExtensionsDictionary = GetVideoFileExtensionsDictionary();
-
-        // http://en.wikipedia.org/wiki/Internet_media_type
-        // Add more as needed
-
-        private static Dictionary<string, string> GetMimeTypeLookup()
+        /// <summary>
+        /// Used for extensions not in <see cref="Model.MimeTypes"/> or to override them.
+        /// </summary>
+        private static readonly FrozenDictionary<string, string> _mimeTypeLookup = new KeyValuePair<string, string>[]
         {
-            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // Type application
+            new(".azw3", "application/vnd.amazon.ebook"),
+            new(".cb7", "application/x-cb7"),
+            new(".cba", "application/x-cba"),
+            new(".cbr", "application/vnd.comicbook-rar"),
+            new(".cbt", "application/x-cbt"),
+            new(".cbz", "application/vnd.comicbook+zip"),
 
-            dict.Add(".jpg", "image/jpeg");
-            dict.Add(".jpeg", "image/jpeg");
-            dict.Add(".tbn", "image/jpeg");
-            dict.Add(".png", "image/png");
-            dict.Add(".gif", "image/gif");
-            dict.Add(".tiff", "image/tiff");
-            dict.Add(".webp", "image/webp");
-            dict.Add(".ico", "image/vnd.microsoft.icon");
-            dict.Add(".mpg", "video/mpeg");
-            dict.Add(".mpeg", "video/mpeg");
-            dict.Add(".ogv", "video/ogg");
-            dict.Add(".mov", "video/quicktime");
-            dict.Add(".webm", "video/webm");
-            dict.Add(".mkv", "video/x-matroska");
-            dict.Add(".wmv", "video/x-ms-wmv");
-            dict.Add(".flv", "video/x-flv");
-            dict.Add(".avi", "video/x-msvideo");
-            dict.Add(".asf", "video/x-ms-asf");
-            dict.Add(".m4v", "video/x-m4v");
-            dict.Add(".m4s", "video/mp4");
-            dict.Add(".cbz", "application/x-cbz");
-            dict.Add(".cbr", "application/epub+zip");
-            dict.Add(".epub", "application/epub+zip");
-            dict.Add(".pdf", "application/pdf");
-            dict.Add(".mobi", "application/x-mobipocket-ebook");
+            // Type image
+            new(".tbn", "image/jpeg"),
 
-            dict.Add(".ass", "text/x-ssa");
-            dict.Add(".ssa", "text/x-ssa");
+            // Type text
+            new(".ass", "text/x-ssa"),
+            new(".ssa", "text/x-ssa"),
+            new(".edl", "text/plain"),
+            new(".html", "text/html; charset=UTF-8"),
+            new(".htm", "text/html; charset=UTF-8"),
 
-            return dict;
-        }
+            // Type video
+            new(".mpegts", "video/mp2t"),
 
-        private static readonly Dictionary<string, string> MimeTypeLookup = GetMimeTypeLookup();
+            // Type audio
+            new(".aac", "audio/aac"),
+            new(".ac3", "audio/ac3"),
+            new(".ape", "audio/x-ape"),
+            new(".dsf", "audio/dsf"),
+            new(".dsp", "audio/dsp"),
+            new(".flac", "audio/flac"),
+            new(".m4b", "audio/mp4"),
+            new(".mp3", "audio/mpeg"),
+            new(".vorbis", "audio/vorbis"),
+            new(".webma", "audio/webm"),
+            new(".wv", "audio/x-wavpack"),
+            new(".xsp", "audio/xsp"),
+        }.ToFrozenDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 
-        private static readonly Dictionary<string, string> ExtensionLookup = CreateExtensionLookup();
-
-        private static Dictionary<string, string> CreateExtensionLookup()
+        private static readonly FrozenDictionary<string, string> _extensionLookup = new KeyValuePair<string, string>[]
         {
-            var dict = MimeTypeLookup
-                .GroupBy(i => i.Value)
-                .ToDictionary(x => x.Key, x => x.First().Key, StringComparer.OrdinalIgnoreCase);
+            // Type application
+            new("application/vnd.comicbook-rar", ".cbr"),
+            new("application/vnd.comicbook+zip", ".cbz"),
+            new("application/x-cb7", ".cb7"),
+            new("application/x-cba", ".cba"),
+            new("application/x-cbr", ".cbr"),
+            new("application/x-cbt", ".cbt"),
+            new("application/x-cbz", ".cbz"),
+            new("application/x-javascript", ".js"),
+            new("application/xml", ".xml"),
+            new("application/x-mpegURL", ".m3u8"),
 
-            dict["image/jpg"] = ".jpg";
-            dict["image/x-png"] = ".png";
+            // Type audio
+            new("audio/aac", ".aac"),
+            new("audio/ac3", ".ac3"),
+            new("audio/dsf", ".dsf"),
+            new("audio/dsp", ".dsp"),
+            new("audio/flac", ".flac"),
+            new("audio/m4b", ".m4b"),
+            new("audio/vorbis", ".vorbis"),
+            new("audio/x-ape", ".ape"),
+            new("audio/xsp", ".xsp"),
+            new("audio/x-aac", ".aac"),
+            new("audio/x-wavpack", ".wv"),
 
-            return dict;
-        }
+            // Type image
+            new("image/jpeg", ".jpg"),
+            new("image/jpg", ".jpg"),
+            new("image/tiff", ".tiff"),
+            new("image/x-png", ".png"),
+            new("image/x-icon", ".ico"),
 
-        public static string GetMimeType(string path)
-        {
-            return GetMimeType(path, true);
-        }
+            // Type text
+            new("text/plain", ".txt"),
+            new("text/rtf", ".rtf"),
+            new("text/x-ssa", ".ssa"),
+
+            // Type video
+            new("video/vnd.mpeg.dash.mpd", ".mpd"),
+            new("video/x-matroska", ".mkv"),
+        }.ToFrozenDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+
+        public static string GetMimeType(string path) => GetMimeType(path, MediaTypeNames.Application.Octet);
 
         /// <summary>
         /// Gets the type of the MIME.
         /// </summary>
-        public static string GetMimeType(string path, bool enableStreamDefault)
+        /// <param name="filename">The filename to find the MIME type of.</param>
+        /// <param name="defaultValue">The default value to return if no fitting MIME type is found.</param>
+        /// <returns>The correct MIME type for the given filename, or <paramref name="defaultValue"/> if it wasn't found.</returns>
+        [return: NotNullIfNotNull("defaultValue")]
+        public static string? GetMimeType(string filename, string? defaultValue = null)
         {
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(filename);
 
-            var ext = Path.GetExtension(path) ?? string.Empty;
+            var ext = Path.GetExtension(filename);
 
-            if (MimeTypeLookup.TryGetValue(ext, out string result))
+            if (_mimeTypeLookup.TryGetValue(ext, out string? result))
             {
                 return result;
             }
 
-            // Type video
-            if (StringHelper.EqualsIgnoreCase(ext, ".3gp"))
+            if (Model.MimeTypes.TryGetMimeType(filename, out var mimeType))
             {
-                return "video/3gpp";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".3g2"))
-            {
-                return "video/3gpp2";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".ts"))
-            {
-                return "video/mp2t";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".mpd"))
-            {
-                return "video/vnd.mpeg.dash.mpd";
+                return mimeType;
             }
 
             // Catch-all for all video types that don't require specific mime types
-            if (VideoFileExtensionsDictionary.ContainsKey(ext))
+            if (_videoFileExtensions.Contains(ext))
             {
-                return "video/" + ext.TrimStart('.').ToLowerInvariant();
+                return string.Concat("video/", ext.AsSpan(1));
             }
 
-            // Type text
-            if (StringHelper.EqualsIgnoreCase(ext, ".css"))
-            {
-                return "text/css";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".csv"))
-            {
-                return "text/csv";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".html"))
-            {
-                return "text/html; charset=UTF-8";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".htm"))
-            {
-                return "text/html; charset=UTF-8";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".txt"))
-            {
-                return "text/plain";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".log"))
-            {
-                return "text/plain";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".xml"))
-            {
-                return "application/xml";
-            }
-
-            // Type audio
-            if (StringHelper.EqualsIgnoreCase(ext, ".mp3"))
-            {
-                return "audio/mpeg";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".m4a"))
-            {
-                return "audio/mp4";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".aac"))
-            {
-                return "audio/mp4";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".webma"))
-            {
-                return "audio/webm";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".wav"))
-            {
-                return "audio/wav";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".wma"))
-            {
-                return "audio/x-ms-wma";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".flac"))
-            {
-                return "audio/flac";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".aac"))
-            {
-                return "audio/x-aac";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".ogg"))
-            {
-                return "audio/ogg";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".oga"))
-            {
-                return "audio/ogg";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".opus"))
-            {
-                return "audio/ogg";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".ac3"))
-            {
-                return "audio/ac3";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".dsf"))
-            {
-                return "audio/dsf";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".m4b"))
-            {
-                return "audio/m4b";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".xsp"))
-            {
-                return "audio/xsp";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".dsp"))
-            {
-                return "audio/dsp";
-            }
-
-            // Playlists
-            if (StringHelper.EqualsIgnoreCase(ext, ".m3u8"))
-            {
-                return "application/x-mpegURL";
-            }
-
-            // Misc
-            if (StringHelper.EqualsIgnoreCase(ext, ".dll"))
-            {
-                return "application/octet-stream";
-            }
-
-            // Web
-            if (StringHelper.EqualsIgnoreCase(ext, ".js"))
-            {
-                return "application/x-javascript";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".json"))
-            {
-                return "application/json";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".map"))
-            {
-                return "application/x-javascript";
-            }
-
-            if (StringHelper.EqualsIgnoreCase(ext, ".woff"))
-            {
-                return "font/woff";
-            }
-
-            if (StringHelper.EqualsIgnoreCase(ext, ".ttf"))
-            {
-                return "font/ttf";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".eot"))
-            {
-                return "application/vnd.ms-fontobject";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".svg"))
-            {
-                return "image/svg+xml";
-            }
-            if (StringHelper.EqualsIgnoreCase(ext, ".svgz"))
-            {
-                return "image/svg+xml";
-            }
-
-            if (StringHelper.EqualsIgnoreCase(ext, ".srt"))
-            {
-                return "text/plain";
-            }
-
-            if (StringHelper.EqualsIgnoreCase(ext, ".vtt"))
-            {
-                return "text/vtt";
-            }
-
-            if (StringHelper.EqualsIgnoreCase(ext, ".ttml"))
-            {
-                return "application/ttml+xml";
-            }
-
-            if (enableStreamDefault)
-            {
-                return "application/octet-stream";
-            }
-
-            return null;
+            return defaultValue;
         }
 
-        public static string ToExtension(string mimeType)
+        public static string? ToExtension(string mimeType)
         {
-            if (string.IsNullOrEmpty(mimeType))
-            {
-                throw new ArgumentNullException(nameof(mimeType));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(mimeType);
 
             // handle text/html; charset=UTF-8
-            mimeType = mimeType.Split(';')[0];
+            mimeType = mimeType.AsSpan().LeftPart(';').ToString();
 
-            if (ExtensionLookup.TryGetValue(mimeType, out string result))
+            if (_extensionLookup.TryGetValue(mimeType, out string? result))
             {
                 return result;
             }
-            return null;
+
+            var extension = Model.MimeTypes.GetMimeTypeExtensions(mimeType).FirstOrDefault();
+            return string.IsNullOrEmpty(extension) ? null : "." + extension;
         }
+
+        public static bool IsImage(ReadOnlySpan<char> mimeType)
+            => mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
     }
 }

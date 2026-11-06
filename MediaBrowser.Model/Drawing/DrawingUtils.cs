@@ -3,20 +3,21 @@ using System;
 namespace MediaBrowser.Model.Drawing
 {
     /// <summary>
-    /// Class DrawingUtils
+    /// Class DrawingUtils.
     /// </summary>
     public static class DrawingUtils
     {
         /// <summary>
-        /// Resizes a set of dimensions
+        /// Resizes a set of dimensions.
         /// </summary>
-        /// <param name="size">The original size object</param>
-        /// <param name="width">A new fixed width, if desired</param>
-        /// <param name="height">A new fixed height, if desired</param>
-        /// <param name="maxWidth">A max fixed width, if desired</param>
-        /// <param name="maxHeight">A max fixed height, if desired</param>
-        /// <returns>A new size object</returns>
-        public static ImageDimensions Resize(ImageDimensions size,
+        /// <param name="size">The original size object.</param>
+        /// <param name="width">A new fixed width, if desired.</param>
+        /// <param name="height">A new fixed height, if desired.</param>
+        /// <param name="maxWidth">A max fixed width, if desired.</param>
+        /// <param name="maxHeight">A max fixed height, if desired.</param>
+        /// <returns>A new size object.</returns>
+        public static ImageDimensions Resize(
+            ImageDimensions size,
             int width,
             int height,
             int maxWidth,
@@ -57,12 +58,87 @@ namespace MediaBrowser.Model.Drawing
         }
 
         /// <summary>
+        /// Scale down to fill box.
+        /// Returns original size if both width and height are null or zero.
+        /// </summary>
+        /// <param name="size">The original size object.</param>
+        /// <param name="fillWidth">A new fixed width, if desired.</param>
+        /// <param name="fillHeight">A new fixed height, if desired.</param>
+        /// <returns>A new size object or size.</returns>
+        public static ImageDimensions ResizeFill(
+            ImageDimensions size,
+            int? fillWidth,
+            int? fillHeight)
+        {
+            // Return original size if input is invalid.
+            if ((fillWidth is null || fillWidth == 0)
+                && (fillHeight is null || fillHeight == 0))
+            {
+                return size;
+            }
+
+            if (fillWidth is null || fillWidth == 0)
+            {
+                fillWidth = 1;
+            }
+
+            if (fillHeight is null || fillHeight == 0)
+            {
+                fillHeight = 1;
+            }
+
+            double widthRatio = size.Width / (double)fillWidth;
+            double heightRatio = size.Height / (double)fillHeight;
+            double scaleRatio = Math.Min(widthRatio, heightRatio);
+
+            // Clamp to current size.
+            if (scaleRatio < 1)
+            {
+                return size;
+            }
+
+            int newWidth = Convert.ToInt32(Math.Ceiling(size.Width / scaleRatio));
+            int newHeight = Convert.ToInt32(Math.Ceiling(size.Height / scaleRatio));
+
+            return new ImageDimensions(newWidth, newHeight);
+        }
+
+        /// <summary>
+        /// Scales a size down uniformly until it fits inside a bounding box.
+        /// Returns the original size if it already fits, so this never upscales.
+        /// </summary>
+        /// <param name="size">The size object.</param>
+        /// <param name="boundingBox">The box the result has to fit inside.</param>
+        /// <returns>A new size object, or <paramref name="size"/> if it already fits.</returns>
+        public static ImageDimensions ScaleDownToFit(ImageDimensions size, ImageDimensions boundingBox)
+        {
+            if (size.Width <= 0 || size.Height <= 0 || boundingBox.Width <= 0 || boundingBox.Height <= 0)
+            {
+                return size;
+            }
+
+            double widthRatio = size.Width / (double)boundingBox.Width;
+            double heightRatio = size.Height / (double)boundingBox.Height;
+            double scaleRatio = Math.Max(widthRatio, heightRatio);
+
+            if (scaleRatio <= 1)
+            {
+                return size;
+            }
+
+            var newWidth = Math.Clamp(Convert.ToInt32(Math.Round(size.Width / scaleRatio)), 1, boundingBox.Width);
+            var newHeight = Math.Clamp(Convert.ToInt32(Math.Round(size.Height / scaleRatio)), 1, boundingBox.Height);
+
+            return new ImageDimensions(newWidth, newHeight);
+        }
+
+        /// <summary>
         /// Gets the new width.
         /// </summary>
         /// <param name="currentHeight">Height of the current.</param>
         /// <param name="currentWidth">Width of the current.</param>
         /// <param name="newHeight">The new height.</param>
-        /// <returns>the new width</returns>
+        /// <returns>The new width.</returns>
         private static int GetNewWidth(int currentHeight, int currentWidth, int newHeight)
             => Convert.ToInt32((double)newHeight / currentHeight * currentWidth);
 

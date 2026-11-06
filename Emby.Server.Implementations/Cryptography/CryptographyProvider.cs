@@ -1,40 +1,101 @@
 using System;
-using System.IO;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
 using MediaBrowser.Model.Cryptography;
+using static MediaBrowser.Model.Cryptography.Constants;
 
 namespace Emby.Server.Implementations.Cryptography
 {
+    /// <summary>
+    /// Class providing abstractions over cryptographic functions.
+    /// </summary>
     public class CryptographyProvider : ICryptoProvider
     {
-        public Guid GetMD5(string str)
+        /// <inheritdoc />
+        public string DefaultHashMethod => "PBKDF2-SHA512";
+
+        /// <inheritdoc />
+        public PasswordHash CreatePasswordHash(ReadOnlySpan<char> password)
         {
-            return new Guid(ComputeMD5(Encoding.Unicode.GetBytes(str)));
+            byte[] salt = GenerateSalt();
+            return new PasswordHash(
+                DefaultHashMethod,
+                Rfc2898DeriveBytes.Pbkdf2(
+                    password,
+                    salt,
+                    DefaultIterations,
+                    HashAlgorithmName.SHA512,
+                    DefaultOutputLength),
+                salt,
+                new Dictionary<string, string>
+                {
+                    { "iterations", DefaultIterations.ToString(CultureInfo.InvariantCulture) }
+                });
         }
 
-        public byte[] ComputeSHA1(byte[] bytes)
+        /// <inheritdoc />
+        public bool Verify(PasswordHash hash, ReadOnlySpan<char> password)
         {
-            using (var provider = SHA1.Create())
+            if (string.Equals(hash.Id, "PBKDF2", StringComparison.Ordinal))
             {
-                return provider.ComputeHash(bytes);
+                var iterations = GetIterationsParameter(hash);
+                return hash.Hash.SequenceEqual(
+                    Rfc2898DeriveBytes.Pbkdf2(
+                        password,
+                        hash.Salt,
+                        iterations,
+                        HashAlgorithmName.SHA1,
+                        32));
             }
+
+            if (string.Equals(hash.Id, "PBKDF2-SHA512", StringComparison.Ordinal))
+            {
+                var iterations = GetIterationsParameter(hash);
+                return hash.Hash.SequenceEqual(
+                    Rfc2898DeriveBytes.Pbkdf2(
+                        password,
+                        hash.Salt,
+                        iterations,
+                        HashAlgorithmName.SHA512,
+                        DefaultOutputLength));
+            }
+
+            throw new NotSupportedException($"Can't verify hash with id: {hash.Id}");
         }
 
-        public byte[] ComputeMD5(Stream str)
+        /// <summary>
+        /// Extracts and validates the iterations parameter from a password hash.
+        /// </summary>
+        /// <param name="hash">The password hash containing parameters.</param>
+        /// <returns>The number of iterations.</returns>
+        /// <exception cref="FormatException">Thrown when iterations parameter is missing or invalid.</exception>
+        private static int GetIterationsParameter(PasswordHash hash)
         {
-            using (var provider = MD5.Create())
+            if (!hash.Parameters.TryGetValue("iterations", out var iterationsStr))
             {
-                return provider.ComputeHash(str);
+                throw new FormatException($"Password hash with id '{hash.Id}' is missing required 'iterations' parameter.");
             }
+
+            if (!int.TryParse(iterationsStr, CultureInfo.InvariantCulture, out var iterations))
+            {
+                throw new FormatException($"Password hash with id '{hash.Id}' has invalid 'iterations' parameter: '{iterationsStr}'.");
+            }
+
+            return iterations;
         }
 
-        public byte[] ComputeMD5(byte[] bytes)
+        /// <inheritdoc />
+        public byte[] GenerateSalt()
+            => GenerateSalt(DefaultSaltLength);
+
+        /// <inheritdoc />
+        public byte[] GenerateSalt(int length)
         {
-            using (var provider = MD5.Create())
-            {
-                return provider.ComputeHash(bytes);
-            }
+            var salt = new byte[length];
+            using var rng = RandomNumberGenerator.Create();
+            rng.GetNonZeroBytes(salt);
+            return salt;
         }
     }
 }

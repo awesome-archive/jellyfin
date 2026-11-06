@@ -1,76 +1,54 @@
 using MediaBrowser.Controller.Configuration;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Providers.Manager;
 using Microsoft.Extensions.Logging;
 
-namespace MediaBrowser.Providers.Movies
+namespace MediaBrowser.Providers.Movies;
+
+/// <summary>
+/// Service to manage movie metadata.
+/// </summary>
+public class MovieMetadataService : MetadataService<Movie, MovieInfo>
 {
-    public class MovieMetadataService : MetadataService<Movie, MovieInfo>
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MovieMetadataService"/> class.
+    /// </summary>
+    /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/>.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
+    /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
+    /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="externalDataManager">Instance of the <see cref="IExternalDataManager"/> interface.</param>
+    /// <param name="itemRepository">Instance of the <see cref="IItemRepository"/> interface.</param>
+    public MovieMetadataService(
+        IServerConfigurationManager serverConfigurationManager,
+        ILogger<MovieMetadataService> logger,
+        IProviderManager providerManager,
+        IFileSystem fileSystem,
+        ILibraryManager libraryManager,
+        IExternalDataManager externalDataManager,
+        IItemRepository itemRepository)
+        : base(serverConfigurationManager, logger, providerManager, fileSystem, libraryManager, externalDataManager, itemRepository)
     {
-        protected override bool IsFullLocalMetadata(Movie item)
-        {
-            if (string.IsNullOrWhiteSpace(item.Overview))
-            {
-                return false;
-            }
-            if (!item.ProductionYear.HasValue)
-            {
-                return false;
-            }
-            return base.IsFullLocalMetadata(item);
-        }
-
-        protected override void MergeData(MetadataResult<Movie> source, MetadataResult<Movie> target, MetadataFields[] lockedFields, bool replaceData, bool mergeMetadataSettings)
-        {
-            ProviderUtils.MergeBaseItemData(source, target, lockedFields, replaceData, mergeMetadataSettings);
-
-            var sourceItem = source.Item;
-            var targetItem = target.Item;
-
-            if (replaceData || string.IsNullOrEmpty(targetItem.CollectionName))
-            {
-                targetItem.CollectionName = sourceItem.CollectionName;
-            }
-        }
-
-        public MovieMetadataService(IServerConfigurationManager serverConfigurationManager, ILogger logger, IProviderManager providerManager, IFileSystem fileSystem, IUserDataManager userDataManager, ILibraryManager libraryManager) : base(serverConfigurationManager, logger, providerManager, fileSystem, userDataManager, libraryManager)
-        {
-        }
     }
 
-    public class TrailerMetadataService : MetadataService<Trailer, TrailerInfo>
+    /// <inheritdoc />
+    protected override void MergeData(MetadataResult<Movie> source, MetadataResult<Movie> target, MetadataField[] lockedFields, bool replaceData, bool mergeMetadataSettings)
     {
-        protected override bool IsFullLocalMetadata(Trailer item)
-        {
-            if (string.IsNullOrWhiteSpace(item.Overview))
-            {
-                return false;
-            }
-            if (!item.ProductionYear.HasValue)
-            {
-                return false;
-            }
-            return base.IsFullLocalMetadata(item);
-        }
+        base.MergeData(source, target, lockedFields, replaceData, mergeMetadataSettings);
 
-        protected override void MergeData(MetadataResult<Trailer> source, MetadataResult<Trailer> target, MetadataFields[] lockedFields, bool replaceData, bool mergeMetadataSettings)
-        {
-            ProviderUtils.MergeBaseItemData(source, target, lockedFields, replaceData, mergeMetadataSettings);
+        var sourceItem = source.Item;
+        var targetItem = target.Item;
 
-            if (replaceData || target.Item.TrailerTypes.Length == 0)
-            {
-                target.Item.TrailerTypes = source.Item.TrailerTypes;
-            }
-        }
-
-        public TrailerMetadataService(IServerConfigurationManager serverConfigurationManager, ILogger logger, IProviderManager providerManager, IFileSystem fileSystem, IUserDataManager userDataManager, ILibraryManager libraryManager) : base(serverConfigurationManager, logger, providerManager, fileSystem, userDataManager, libraryManager)
+        if (replaceData || string.IsNullOrEmpty(targetItem.CollectionName))
         {
+            targetItem.CollectionName = sourceItem.CollectionName;
         }
     }
-
 }

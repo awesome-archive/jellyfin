@@ -1,43 +1,41 @@
+#nullable disable
+
+#pragma warning disable CA1819, CS1591
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
     /// <summary>
     /// Specialized folder that can have items added to it's children by external entities.
-    /// Used for our RootFolder so plug-ins can add items.
+    /// Used for our RootFolder so plugins can add items.
     /// </summary>
     public class AggregateFolder : Folder
     {
+        private readonly Lock _childIdsLock = new();
+
+        /// <summary>
+        /// The _virtual children.
+        /// </summary>
+        private readonly ConcurrentBag<BaseItem> _virtualChildren = new ConcurrentBag<BaseItem>();
+        private bool _requiresRefresh;
+        private Guid[] _childrenIds = null;
+
         public AggregateFolder()
         {
             PhysicalLocationsList = Array.Empty<string>();
         }
-
-        [IgnoreDataMember]
-        public override bool IsPhysicalRoot => true;
-
-        public override bool CanDelete()
-        {
-            return false;
-        }
-
-        [IgnoreDataMember]
-        public override bool SupportsPlayedStatus => false;
-
-        /// <summary>
-        /// The _virtual children
-        /// </summary>
-        private readonly ConcurrentBag<BaseItem> _virtualChildren = new ConcurrentBag<BaseItem>();
 
         /// <summary>
         /// Gets the virtual children.
@@ -45,30 +43,57 @@ namespace MediaBrowser.Controller.Entities
         /// <value>The virtual children.</value>
         public ConcurrentBag<BaseItem> VirtualChildren => _virtualChildren;
 
-        [IgnoreDataMember]
+        [JsonIgnore]
+        public override bool IsPhysicalRoot => true;
+
+        [JsonIgnore]
+        public override bool SupportsPlayedStatus => false;
+
+        [JsonIgnore]
         public override string[] PhysicalLocations => PhysicalLocationsList;
 
         public string[] PhysicalLocationsList { get; set; }
+
+        // Children caches the resolved items, _childrenIds the ids they were loaded from. Clearing
+        // only the former sends the next read back through LoadChildren, which replays the stale
+        // id list, so a caller invalidating this folder has to drop both.
+        [JsonIgnore]
+        public override IEnumerable<BaseItem> Children
+        {
+            get => base.Children;
+            set
+            {
+                if (value is null)
+                {
+                    ClearCache();
+                }
+
+                base.Children = value;
+            }
+        }
+
+        public override bool CanDelete()
+        {
+            return false;
+        }
 
         protected override FileSystemMetadata[] GetFileSystemChildren(IDirectoryService directoryService)
         {
             return CreateResolveArgs(directoryService, true).FileSystemChildren;
         }
 
-        private Guid[] _childrenIds = null;
-        private readonly object _childIdsLock = new object();
-        protected override List<BaseItem> LoadChildren()
+        protected override IReadOnlyList<BaseItem> LoadChildren()
         {
             lock (_childIdsLock)
             {
-                if (_childrenIds == null || _childrenIds.Length == 0)
+                if (_childrenIds is null || _childrenIds.Length == 0)
                 {
                     var list = base.LoadChildren();
                     _childrenIds = list.Select(i => i.Id).ToArray();
                     return list;
                 }
 
-                return _childrenIds.Select(LibraryManager.GetItemById).Where(i => i != null).ToList();
+                return _childrenIds.Select(LibraryManager.GetItemById).Where(i => i is not null).ToList();
             }
         }
 
@@ -80,7 +105,6 @@ namespace MediaBrowser.Controller.Entities
             }
         }
 
-        private bool _requiresRefresh;
         public override bool RequiresRefresh()
         {
             var changed = base.RequiresRefresh() || _requiresRefresh;
@@ -89,7 +113,7 @@ namespace MediaBrowser.Controller.Entities
             {
                 var locations = PhysicalLocations;
 
-                var newLocations = CreateResolveArgs(new DirectoryService(Logger, FileSystem), false).PhysicalLocations;
+                var newLocations = CreateResolveArgs(new DirectoryService(FileSystem), false).PhysicalLocations;
 
                 if (!locations.SequenceEqual(newLocations))
                 {
@@ -100,11 +124,11 @@ namespace MediaBrowser.Controller.Entities
             return changed;
         }
 
-        public override bool BeforeMetadataRefresh(bool replaceAllMetdata)
+        public override bool BeforeMetadataRefresh(bool replaceAllMetadata)
         {
             ClearCache();
 
-            var changed = base.BeforeMetadataRefresh(replaceAllMetdata) || _requiresRefresh;
+            var changed = base.BeforeMetadataRefresh(replaceAllMetadata) || _requiresRefresh;
             _requiresRefresh = false;
             return changed;
         }
@@ -115,10 +139,9 @@ namespace MediaBrowser.Controller.Entities
 
             var path = ContainingFolderPath;
 
-            var args = new ItemResolveArgs(ConfigurationManager.ApplicationPaths, directoryService)
+            var args = new ItemResolveArgs(ConfigurationManager.ApplicationPaths, LibraryManager)
             {
-                FileInfo = FileSystem.GetDirectoryInfo(path),
-                Path = path
+                FileInfo = FileSystem.GetDirectoryInfo(path)
             };
 
             // Gather child folder and files
@@ -150,11 +173,11 @@ namespace MediaBrowser.Controller.Entities
             return base.GetNonCachedChildren(directoryService).Concat(_virtualChildren);
         }
 
-        protected override async Task ValidateChildrenInternal(IProgress<double> progress, CancellationToken cancellationToken, bool recursive, bool refreshChildMetadata, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService)
+        protected override async Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             ClearCache();
 
-            await base.ValidateChildrenInternal(progress, cancellationToken, recursive, refreshChildMetadata, refreshOptions, directoryService)
+            await base.ValidateChildrenInternal(progress, recursive, refreshChildMetadata, allowRemoveRoot, refreshOptions, directoryService, cancellationToken)
                 .ConfigureAwait(false);
 
             ClearCache();
@@ -164,13 +187,10 @@ namespace MediaBrowser.Controller.Entities
         /// Adds the virtual child.
         /// </summary>
         /// <param name="child">The child.</param>
-        /// <exception cref="ArgumentNullException"></exception>
+        /// <exception cref="ArgumentNullException">Throws if child is null.</exception>
         public void AddVirtualChild(BaseItem child)
         {
-            if (child == null)
-            {
-                throw new ArgumentNullException(nameof(child));
-            }
+            ArgumentNullException.ThrowIfNull(child);
 
             _virtualChildren.Add(child);
         }
@@ -180,21 +200,22 @@ namespace MediaBrowser.Controller.Entities
         /// </summary>
         /// <param name="id">The id.</param>
         /// <returns>BaseItem.</returns>
-        /// <exception cref="ArgumentNullException">id</exception>
+        /// <exception cref="ArgumentNullException">The id is empty.</exception>
         public BaseItem FindVirtualChild(Guid id)
         {
-            if (id.Equals(Guid.Empty))
+            if (id.IsEmpty())
             {
                 throw new ArgumentNullException(nameof(id));
             }
 
             foreach (var child in _virtualChildren)
             {
-                if (child.Id == id)
+                if (child.Id.Equals(id))
                 {
                     return child;
                 }
             }
+
             return null;
         }
     }

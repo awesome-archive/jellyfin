@@ -1,4 +1,7 @@
-using MediaBrowser.Model.Serialization;
+#pragma warning disable CS1591
+
+using System.Text.Json.Serialization;
+using Jellyfin.Data.Enums;
 
 namespace MediaBrowser.Controller.Entities
 {
@@ -8,8 +11,14 @@ namespace MediaBrowser.Controller.Entities
     /// </summary>
     public abstract class BasePluginFolder : Folder, ICollectionFolder
     {
-        [IgnoreDataMember]
-        public virtual string CollectionType => null;
+        [JsonIgnore]
+        public virtual CollectionType? CollectionType => null;
+
+        [JsonIgnore]
+        public override bool SupportsInheritedParentImages => false;
+
+        [JsonIgnore]
+        public override bool SupportsPeople => false;
 
         public override bool CanDelete()
         {
@@ -20,19 +29,5 @@ namespace MediaBrowser.Controller.Entities
         {
             return true;
         }
-
-        [IgnoreDataMember]
-        public override bool SupportsInheritedParentImages => false;
-
-        [IgnoreDataMember]
-        public override bool SupportsPeople => false;
-
-        //public override double? GetDefaultPrimaryImageAspectRatio()
-        //{
-        //    double value = 16;
-        //    value /= 9;
-
-        //    return value;
-        //}
     }
 }

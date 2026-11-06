@@ -4,48 +4,64 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Xml;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Xml;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.XbmcMetadata.Savers
 {
+    /// <summary>
+    /// Nfo saver for albums.
+    /// </summary>
     public class AlbumNfoSaver : BaseNfoSaver
     {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AlbumNfoSaver"/> class.
+        /// </summary>
+        /// <param name="fileSystem">The file system.</param>
+        /// <param name="configurationManager">the server configuration manager.</param>
+        /// <param name="libraryManager">The library manager.</param>
+        /// <param name="userManager">The user manager.</param>
+        /// <param name="userDataManager">The user data manager.</param>
+        /// <param name="logger">The logger.</param>
+        public AlbumNfoSaver(
+            IFileSystem fileSystem,
+            IServerConfigurationManager configurationManager,
+            ILibraryManager libraryManager,
+            IUserManager userManager,
+            IUserDataManager userDataManager,
+            ILogger<AlbumNfoSaver> logger)
+            : base(fileSystem, configurationManager, libraryManager, userManager, userDataManager, logger)
+        {
+        }
+
+        /// <inheritdoc />
         protected override string GetLocalSavePath(BaseItem item)
-        {
-            return Path.Combine(item.Path, "album.nfo");
-        }
+            => Path.Combine(item.Path, "album.nfo");
 
+        /// <inheritdoc />
         protected override string GetRootElementName(BaseItem item)
-        {
-            return "album";
-        }
+            => "album";
 
+        /// <inheritdoc />
         public override bool IsEnabledFor(BaseItem item, ItemUpdateType updateType)
-        {
-            if (!item.SupportsLocalMetadata)
-            {
-                return false;
-            }
+            => item.SupportsLocalMetadata && item is MusicAlbum && updateType >= MinimumUpdateType;
 
-            return item is MusicAlbum && updateType >= MinimumUpdateType;
-        }
-
+        /// <inheritdoc />
         protected override void WriteCustomElements(BaseItem item, XmlWriter writer)
         {
             var album = (MusicAlbum)item;
 
-            foreach (var artist in album.Artists)
+            foreach (var artist in album.Artists.Trimmed().OrderBy(artist => artist))
             {
                 writer.WriteElementString("artist", artist);
             }
 
-            foreach (var artist in album.AlbumArtists)
+            foreach (var artist in album.AlbumArtists.Trimmed().OrderBy(artist => artist))
             {
                 writer.WriteElementString("albumartist", artist);
             }
@@ -53,17 +69,24 @@ namespace MediaBrowser.XbmcMetadata.Savers
             AddTracks(album.Tracks, writer);
         }
 
-        private readonly CultureInfo UsCulture = new CultureInfo("en-US");
-
         private void AddTracks(IEnumerable<BaseItem> tracks, XmlWriter writer)
         {
-            foreach (var track in tracks.OrderBy(i => i.ParentIndexNumber ?? 0).ThenBy(i => i.IndexNumber ?? 0))
+            foreach (var track in tracks
+                .OrderBy(i => i.ParentIndexNumber ?? 0)
+                .ThenBy(i => i.IndexNumber ?? 0)
+                .ThenBy(i => SortNameOrName(i))
+                .ThenBy(i => i.Name?.Trim()))
             {
                 writer.WriteStartElement("track");
 
-                if (track.IndexNumber.HasValue)
+                if (track.ParentIndexNumber.HasValue && track.ParentIndexNumber.Value != 0)
                 {
-                    writer.WriteElementString("position", track.IndexNumber.Value.ToString(UsCulture));
+                    writer.WriteElementString("disc", track.ParentIndexNumber.Value.ToString(CultureInfo.InvariantCulture));
+                }
+
+                if (track.IndexNumber.HasValue && track.IndexNumber.Value != 0)
+                {
+                    writer.WriteElementString("position", track.IndexNumber.Value.ToString(CultureInfo.InvariantCulture));
                 }
 
                 if (!string.IsNullOrEmpty(track.Name))
@@ -73,7 +96,7 @@ namespace MediaBrowser.XbmcMetadata.Savers
 
                 if (track.RunTimeTicks.HasValue)
                 {
-                    var time = TimeSpan.FromTicks(track.RunTimeTicks.Value).ToString(@"mm\:ss");
+                    var time = TimeSpan.FromTicks(track.RunTimeTicks.Value).ToString(@"mm\:ss", CultureInfo.InvariantCulture);
 
                     writer.WriteElementString("duration", time);
                 }
@@ -82,20 +105,17 @@ namespace MediaBrowser.XbmcMetadata.Savers
             }
         }
 
-        protected override List<string> GetTagsUsed(BaseItem item)
+        /// <inheritdoc />
+        protected override IEnumerable<string> GetTagsUsed(BaseItem item)
         {
-            var list = base.GetTagsUsed(item);
-            list.AddRange(new string[]
+            foreach (var tag in base.GetTagsUsed(item))
             {
-                "track",
-                "artist",
-                "albumartist"
-            });
-            return list;
-        }
+                yield return tag;
+            }
 
-        public AlbumNfoSaver(IFileSystem fileSystem, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, IUserManager userManager, IUserDataManager userDataManager, ILogger logger, IXmlReaderSettingsFactory xmlReaderSettingsFactory) : base(fileSystem, configurationManager, libraryManager, userManager, userDataManager, logger, xmlReaderSettingsFactory)
-        {
+            yield return "track";
+            yield return "artist";
+            yield return "albumartist";
         }
     }
 }

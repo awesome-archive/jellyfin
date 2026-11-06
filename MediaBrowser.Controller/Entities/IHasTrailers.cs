@@ -1,6 +1,8 @@
-using System;
+#nullable disable
+
+#pragma warning disable CS1591
+
 using System.Collections.Generic;
-using System.Linq;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Controller.Entities
@@ -11,29 +13,26 @@ namespace MediaBrowser.Controller.Entities
         /// Gets or sets the remote trailers.
         /// </summary>
         /// <value>The remote trailers.</value>
-        MediaUrl[] RemoteTrailers { get; set; }
+        IReadOnlyList<MediaUrl> RemoteTrailers { get; set; }
 
         /// <summary>
-        /// Gets or sets the local trailer ids.
+        /// Gets the local trailers.
         /// </summary>
-        /// <value>The local trailer ids.</value>
-        Guid[] LocalTrailerIds { get; set; }
-        Guid[] RemoteTrailerIds { get; set; }
-        Guid Id { get; set; }
+        /// <value>The local trailers.</value>
+        IReadOnlyList<BaseItem> LocalTrailers { get; }
     }
 
+    /// <summary>
+    /// Class providing extension methods for working with <see cref="IHasTrailers" />.
+    /// </summary>
     public static class HasTrailerExtensions
     {
         /// <summary>
-        /// Gets the trailer ids.
+        /// Gets the trailer count.
         /// </summary>
-        /// <returns>List&lt;Guid&gt;.</returns>
-        public static List<Guid> GetTrailerIds(this IHasTrailers item)
-        {
-            var list = item.LocalTrailerIds.ToList();
-            list.AddRange(item.RemoteTrailerIds);
-            return list;
-        }
-
+        /// <param name="item">Media item.</param>
+        /// <returns><see cref="IReadOnlyList{Guid}" />.</returns>
+        public static int GetTrailerCount(this IHasTrailers item)
+            => item.LocalTrailers.Count + item.RemoteTrailers.Count;
     }
 }

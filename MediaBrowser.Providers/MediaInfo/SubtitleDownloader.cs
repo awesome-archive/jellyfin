@@ -1,3 +1,7 @@
+#nullable disable
+
+#pragma warning disable CA1002, CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -25,22 +29,33 @@ namespace MediaBrowser.Providers.MediaInfo
             _subtitleManager = subtitleManager;
         }
 
-        public async Task<List<string>> DownloadSubtitles(Video video,
-            List<MediaStream> mediaStreams,
+        public async Task<List<string>> DownloadSubtitles(
+            Video video,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
             IEnumerable<string> languages,
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             var downloadedLanguages = new List<string>();
 
             foreach (var lang in languages)
             {
-                var downloaded = await DownloadSubtitles(video, mediaStreams, skipIfEmbeddedSubtitlesPresent,
-                    skipIfAudioTrackMatches, requirePerfectMatch, lang, disabledSubtitleFetchers, subtitleFetcherOrder, cancellationToken).ConfigureAwait(false);
+                var downloaded = await DownloadSubtitles(
+                    video,
+                    mediaStreams,
+                    skipIfEmbeddedSubtitlesPresent,
+                    skipIfAudioTrackMatches,
+                    requirePerfectMatch,
+                    lang,
+                    disabledSubtitleFetchers,
+                    subtitleFetcherOrder,
+                    isAutomated,
+                    cancellationToken).ConfigureAwait(false);
 
                 if (downloaded)
                 {
@@ -51,14 +66,16 @@ namespace MediaBrowser.Providers.MediaInfo
             return downloadedLanguages;
         }
 
-        public Task<bool> DownloadSubtitles(Video video,
-            List<MediaStream> mediaStreams,
+        public Task<bool> DownloadSubtitles(
+            Video video,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
             string lang,
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             if (video.VideoType != VideoType.VideoFile)
@@ -87,12 +104,23 @@ namespace MediaBrowser.Providers.MediaInfo
                 return Task.FromResult(false);
             }
 
-            return DownloadSubtitles(video, mediaStreams, skipIfEmbeddedSubtitlesPresent, skipIfAudioTrackMatches,
-                requirePerfectMatch, lang, disabledSubtitleFetchers, subtitleFetcherOrder, mediaType, cancellationToken);
+            return DownloadSubtitles(
+                video,
+                mediaStreams,
+                skipIfEmbeddedSubtitlesPresent,
+                skipIfAudioTrackMatches,
+                requirePerfectMatch,
+                lang,
+                disabledSubtitleFetchers,
+                subtitleFetcherOrder,
+                mediaType,
+                isAutomated,
+                cancellationToken);
         }
 
-        private async Task<bool> DownloadSubtitles(Video video,
-            List<MediaStream> mediaStreams,
+        private async Task<bool> DownloadSubtitles(
+            Video video,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
@@ -100,6 +128,7 @@ namespace MediaBrowser.Providers.MediaInfo
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
             VideoContentType mediaType,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             // There's already subtitles for this language
@@ -147,12 +176,11 @@ namespace MediaBrowser.Providers.MediaInfo
 
                 IsPerfectMatch = requirePerfectMatch,
                 DisabledSubtitleFetchers = disabledSubtitleFetchers,
-                SubtitleFetcherOrder = subtitleFetcherOrder
+                SubtitleFetcherOrder = subtitleFetcherOrder,
+                IsAutomated = isAutomated
             };
 
-            var episode = video as Episode;
-
-            if (episode != null)
+            if (video is Episode episode)
             {
                 request.IndexNumberEnd = episode.IndexNumberEnd;
                 request.SeriesName = episode.SeriesName;
@@ -164,7 +192,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
                 var result = searchResults.FirstOrDefault();
 
-                if (result != null)
+                if (result is not null)
                 {
                     await _subtitleManager.DownloadSubtitles(video, result.Id, cancellationToken).ConfigureAwait(false);
 

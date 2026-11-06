@@ -1,9 +1,10 @@
+#nullable disable
 using System;
 
 namespace MediaBrowser.Model.Tasks
 {
     /// <summary>
-    /// Class TaskTriggerInfo
+    /// Class TaskTriggerInfo.
     /// </summary>
     public class TaskTriggerInfo
     {
@@ -11,7 +12,7 @@ namespace MediaBrowser.Model.Tasks
         /// Gets or sets the type.
         /// </summary>
         /// <value>The type.</value>
-        public string Type { get; set; }
+        public TaskTriggerInfoType Type { get; set; }
 
         /// <summary>
         /// Gets or sets the time of day.
@@ -36,11 +37,5 @@ namespace MediaBrowser.Model.Tasks
         /// </summary>
         /// <value>The maximum runtime ticks.</value>
         public long? MaxRuntimeTicks { get; set; }
-
-        public const string TriggerDaily = "DailyTrigger";
-        public const string TriggerWeekly = "WeeklyTrigger";
-        public const string TriggerInterval = "IntervalTrigger";
-        public const string TriggerSystemEvent = "SystemEventTrigger";
-        public const string TriggerStartup = "StartupTrigger";
     }
 }

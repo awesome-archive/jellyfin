@@ -1,119 +1,129 @@
-using MediaBrowser.Common;
-using MediaBrowser.Common.Updates;
-using MediaBrowser.Model.Net;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Common.Progress;
+using MediaBrowser.Common.Updates;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Emby.Server.Implementations.ScheduledTasks
+namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
+
+/// <summary>
+/// Plugin Update Task.
+/// </summary>
+public class PluginUpdateTask : IScheduledTask, IConfigurableScheduledTask
 {
+    private readonly ILogger<PluginUpdateTask> _logger;
+
+    private readonly IInstallationManager _installationManager;
+    private readonly ILocalizationManager _localization;
+
     /// <summary>
-    /// Plugin Update Task
+    /// Initializes a new instance of the <see cref="PluginUpdateTask" /> class.
     /// </summary>
-    public class PluginUpdateTask : IScheduledTask, IConfigurableScheduledTask
+    /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
+    /// <param name="installationManager">Instance of the <see cref="IInstallationManager"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    public PluginUpdateTask(ILogger<PluginUpdateTask> logger, IInstallationManager installationManager, ILocalizationManager localization)
     {
-        /// <summary>
-        /// The _logger
-        /// </summary>
-        private readonly ILogger _logger;
+        _logger = logger;
+        _installationManager = installationManager;
+        _localization = localization;
+    }
 
-        private readonly IInstallationManager _installationManager;
+    /// <inheritdoc />
+    public string Name => _localization.GetLocalizedString("TaskUpdatePlugins");
 
-        private readonly IApplicationHost _appHost;
+    /// <inheritdoc />
+    public string Description => _localization.GetLocalizedString("TaskUpdatePluginsDescription");
 
-        public PluginUpdateTask(ILogger logger, IInstallationManager installationManager, IApplicationHost appHost)
+    /// <inheritdoc />
+    public string Category => _localization.GetLocalizedString("TasksApplicationCategory");
+
+    /// <inheritdoc />
+    public string Key => "PluginUpdates";
+
+    /// <inheritdoc />
+    public bool IsHidden => false;
+
+    /// <inheritdoc />
+    public bool IsEnabled => true;
+
+    /// <inheritdoc />
+    public bool IsLogged => true;
+
+    /// <inheritdoc />
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        yield return new TaskTriggerInfo
         {
-            _logger = logger;
-            _installationManager = installationManager;
-            _appHost = appHost;
-        }
+            Type = TaskTriggerInfoType.StartupTrigger
+        };
 
-        /// <summary>
-        /// Creates the triggers that define when the task will run
-        /// </summary>
-        /// <returns>IEnumerable{BaseTaskTrigger}.</returns>
-        public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+        yield return new TaskTriggerInfo
         {
-            return new[] { 
-            
-                // At startup
-                new TaskTriggerInfo {Type = TaskTriggerInfo.TriggerStartup},
+            Type = TaskTriggerInfoType.IntervalTrigger,
+            IntervalTicks = TimeSpan.FromHours(24).Ticks
+        };
+    }
 
-                // Every so often
-                new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerInterval, IntervalTicks = TimeSpan.FromHours(24).Ticks}
-            };
-        }
+    /// <inheritdoc />
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        progress.Report(0);
 
-        /// <summary>
-        /// Update installed plugins
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
+        var packageFetchTask = _installationManager.GetAvailablePluginUpdates(cancellationToken);
+        var packagesToInstall = (await packageFetchTask.ConfigureAwait(false)).ToList();
+
+        progress.Report(10);
+
+        var numComplete = 0;
+
+        foreach (var package in packagesToInstall)
         {
-            progress.Report(0);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var packagesToInstall = (await _installationManager.GetAvailablePluginUpdates(typeof(PluginUpdateTask).Assembly.GetName().Version, true, cancellationToken).ConfigureAwait(false)).ToList();
-
-            progress.Report(10);
-
-            var numComplete = 0;
-
-            foreach (var package in packagesToInstall)
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                try
+                await _installationManager.InstallPackage(package, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // InstallPackage has its own inner cancellation token, so only throw this if it's ours
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    await _installationManager.InstallPackage(package, true, new SimpleProgress<double>(), cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // InstallPackage has it's own inner cancellation token, so only throw this if it's ours
-                    if (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                }
-                catch (HttpException ex)
-                {
-                    _logger.LogError(ex, "Error downloading {0}", package.name);
-                }
-                catch (IOException ex)
-                {
-                    _logger.LogError(ex, "Error updating {0}", package.name);
-                }
-
-                // Update progress
-                lock (progress)
-                {
-                    numComplete++;
-                    progress.Report(90.0 * numComplete / packagesToInstall.Count + 10);
+                    throw;
                 }
             }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex, "Error downloading {Name}", package.Name);
+            }
+            catch (IOException ex)
+            {
+                _logger.LogError(ex, "Error updating {Name}", package.Name);
+            }
+            catch (TimeoutException ex)
+            {
+                // One slow download must not abort the updates for the remaining plugins.
+                _logger.LogError(ex, "Error downloading {Name}", package.Name);
+            }
+            catch (InvalidDataException ex)
+            {
+                _logger.LogError(ex, "Error updating {Name}", package.Name);
+            }
 
-            progress.Report(100);
+            // Update progress
+            lock (progress)
+            {
+                progress.Report((90.0 * ++numComplete / packagesToInstall.Count) + 10);
+            }
         }
 
-        public string Name => "Check for plugin updates";
-
-        public string Description => "Downloads and installs updates for plugins that are configured to update automatically.";
-
-        public string Category => "Application";
-
-        public string Key => "PluginUpdates";
-
-        public bool IsHidden => false;
-
-        public bool IsEnabled => true;
-
-        public bool IsLogged => true;
+        progress.Report(100);
     }
 }

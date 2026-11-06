@@ -1,3 +1,5 @@
+#pragma warning disable CS1591
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -5,88 +7,180 @@ using System.Net.WebSockets;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Net;
+using MediaBrowser.Controller.Net.WebSocketMessages;
 using MediaBrowser.Controller.Session;
-using MediaBrowser.Model.Net;
+using MediaBrowser.Model.Session;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Session
 {
-    public class WebSocketController : ISessionController, IDisposable
+    public sealed class WebSocketController : ISessionController, IAsyncDisposable, IDisposable
     {
-        public SessionInfo Session { get; private set; }
-        public IReadOnlyList<IWebSocketConnection> Sockets { get; private set; }
-
-        private readonly ILogger _logger;
-
+        private readonly ILogger<WebSocketController> _logger;
         private readonly ISessionManager _sessionManager;
+        private readonly SessionInfo _session;
 
-        public WebSocketController(SessionInfo session, ILogger logger, ISessionManager sessionManager)
+        private readonly List<IWebSocketConnection> _sockets;
+        private readonly ReaderWriterLockSlim _socketsLock;
+        private bool _disposed = false;
+
+        public WebSocketController(
+            ILogger<WebSocketController> logger,
+            SessionInfo session,
+            ISessionManager sessionManager)
         {
-            Session = session;
             _logger = logger;
+            _session = session;
             _sessionManager = sessionManager;
-            Sockets = new List<IWebSocketConnection>();
+            _sockets = new();
+            _socketsLock = new();
         }
 
-        private bool HasOpenSockets => GetActiveSockets().Any();
+        private bool HasOpenSockets
+        {
+            get
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                try
+                {
+                    _socketsLock.EnterReadLock();
+                    return _sockets.Any(i => i.State == WebSocketState.Open);
+                }
+                finally
+                {
+                    _socketsLock.ExitReadLock();
+                }
+            }
+        }
 
+        /// <inheritdoc />
         public bool SupportsMediaControl => HasOpenSockets;
 
+        /// <inheritdoc />
         public bool IsSessionActive => HasOpenSockets;
-
-        private IEnumerable<IWebSocketConnection> GetActiveSockets()
-        {
-            return Sockets
-                .OrderByDescending(i => i.LastActivityDate)
-                .Where(i => i.State == WebSocketState.Open);
-        }
 
         public void AddWebSocket(IWebSocketConnection connection)
         {
-            var sockets = Sockets.ToList();
-            sockets.Add(connection);
-
-            Sockets = sockets;
-
-            connection.Closed += connection_Closed;
+            _logger.LogDebug("Adding websocket to session {Session}", _session.Id);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            try
+            {
+                _socketsLock.EnterWriteLock();
+                _sockets.Add(connection);
+                connection.Closed += OnConnectionClosed;
+            }
+            finally
+            {
+                _socketsLock.ExitWriteLock();
+            }
         }
 
-        void connection_Closed(object sender, EventArgs e)
+        private async void OnConnectionClosed(object? sender, EventArgs e)
         {
-            var connection = (IWebSocketConnection)sender;
-            var sockets = Sockets.ToList();
-            sockets.Remove(connection);
+            var connection = sender as IWebSocketConnection ?? throw new ArgumentException($"{nameof(sender)} is not of type {nameof(IWebSocketConnection)}", nameof(sender));
+            _logger.LogDebug("Removing websocket from session {Session}", _session.Id);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            try
+            {
+                _socketsLock.EnterWriteLock();
+                _sockets.Remove(connection);
+                connection.Closed -= OnConnectionClosed;
+            }
+            finally
+            {
+                _socketsLock.ExitWriteLock();
+            }
 
-            Sockets = sockets;
-
-            _sessionManager.CloseIfNeeded(Session);
+            await _sessionManager.CloseIfNeededAsync(_session).ConfigureAwait(false);
         }
 
-        public Task SendMessage<T>(string name, string messageId, T data, ISessionController[] allControllers, CancellationToken cancellationToken)
+        /// <inheritdoc />
+        public Task SendMessage<T>(
+            SessionMessageType name,
+            Guid messageId,
+            T data,
+            CancellationToken cancellationToken)
         {
-            var socket = GetActiveSockets()
-                .FirstOrDefault();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            IWebSocketConnection? socket;
+            try
+            {
+                _socketsLock.EnterReadLock();
+                socket = _sockets.Where(i => i.State == WebSocketState.Open).MaxBy(i => i.LastActivityDate);
+            }
+            finally
+            {
+                _socketsLock.ExitReadLock();
+            }
 
-            if (socket == null)
+            if (socket is null)
             {
                 return Task.CompletedTask;
             }
 
-            return socket.SendAsync(new WebSocketMessage<T>
-            {
-                Data = data,
-                MessageType = name,
-                MessageId = messageId
-
-            }, cancellationToken);
+            return socket.SendAsync(
+                new OutboundWebSocketMessage<T>
+                {
+                    Data = data,
+                    MessageType = name,
+                    MessageId = messageId
+                },
+                cancellationToken);
         }
 
+        /// <inheritdoc />
         public void Dispose()
         {
-            foreach (var socket in Sockets.ToList())
+            if (_disposed)
             {
-                socket.Closed -= connection_Closed;
+                return;
             }
+
+            try
+            {
+                _socketsLock.EnterWriteLock();
+                foreach (var socket in _sockets)
+                {
+                    socket.Closed -= OnConnectionClosed;
+                    socket.Dispose();
+                }
+
+                _sockets.Clear();
+            }
+            finally
+            {
+                _socketsLock.ExitWriteLock();
+            }
+
+            _socketsLock.Dispose();
+            _disposed = true;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                _socketsLock.EnterWriteLock();
+                foreach (var socket in _sockets)
+                {
+                    socket.Closed -= OnConnectionClosed;
+                    await socket.DisposeAsync().ConfigureAwait(false);
+                }
+
+                _sockets.Clear();
+            }
+            finally
+            {
+                _socketsLock.ExitWriteLock();
+            }
+
+            _socketsLock.Dispose();
+            _disposed = true;
         }
     }
 }

@@ -3,73 +3,63 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Server.Implementations.Library;
-using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Tasks;
 
-namespace Emby.Server.Implementations.ScheduledTasks
+namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
+
+/// <summary>
+/// Class RefreshMediaLibraryTask.
+/// </summary>
+public class RefreshMediaLibraryTask : IScheduledTask
 {
     /// <summary>
-    /// Class RefreshMediaLibraryTask
+    /// The _library manager.
     /// </summary>
-    public class RefreshMediaLibraryTask : IScheduledTask
+    private readonly ILibraryManager _libraryManager;
+    private readonly ILocalizationManager _localization;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="RefreshMediaLibraryTask" /> class.
+    /// </summary>
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    public RefreshMediaLibraryTask(ILibraryManager libraryManager, ILocalizationManager localization)
     {
-        /// <summary>
-        /// The _library manager
-        /// </summary>
-        private readonly ILibraryManager _libraryManager;
-        private readonly IServerConfigurationManager _config;
+        _libraryManager = libraryManager;
+        _localization = localization;
+    }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="RefreshMediaLibraryTask" /> class.
-        /// </summary>
-        /// <param name="libraryManager">The library manager.</param>
-        public RefreshMediaLibraryTask(ILibraryManager libraryManager, IServerConfigurationManager config)
+    /// <inheritdoc />
+    public string Name => _localization.GetLocalizedString("TaskRefreshLibrary");
+
+    /// <inheritdoc />
+    public string Description => _localization.GetLocalizedString("TaskRefreshLibraryDescription");
+
+    /// <inheritdoc />
+    public string Category => _localization.GetLocalizedString("TasksLibraryCategory");
+
+    /// <inheritdoc />
+    public string Key => "RefreshLibrary";
+
+    /// <inheritdoc />
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        yield return new TaskTriggerInfo
         {
-            _libraryManager = libraryManager;
-            _config = config;
-        }
+            Type = TaskTriggerInfoType.IntervalTrigger,
+            IntervalTicks = TimeSpan.FromHours(12).Ticks
+        };
+    }
 
-        /// <summary>
-        /// Creates the triggers that define when the task will run
-        /// </summary>
-        /// <returns>IEnumerable{BaseTaskTrigger}.</returns>
-        public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
-        {
-            return new[] {
+    /// <inheritdoc />
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
 
-                // Every so often
-                new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerInterval, IntervalTicks = TimeSpan.FromHours(12).Ticks}
-            };
-        }
+        progress.Report(0);
 
-        /// <summary>
-        /// Executes the internal.
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            progress.Report(0);
-
-            return ((LibraryManager)_libraryManager).ValidateMediaLibraryInternal(progress, cancellationToken);
-        }
-
-        public string Name => "Scan media library";
-
-        public string Description => "Scans your media library and refreshes metatata based on configuration.";
-
-        public string Category => "Library";
-
-        public string Key => "RefreshLibrary";
-
-        public bool IsHidden => false;
-
-        public bool IsEnabled => true;
-
-        public bool IsLogged => true;
+        await ((LibraryManager)_libraryManager).ValidateMediaLibraryInternal(progress, cancellationToken).ConfigureAwait(false);
     }
 }

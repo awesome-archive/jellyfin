@@ -1,43 +1,53 @@
+using System;
 using System.Collections.Generic;
+using MediaBrowser.Model.Entities;
 
 namespace Emby.Naming.Video
 {
     /// <summary>
-    /// Represents a complete video, including all parts and subtitles
+    /// Represents a complete video, including all parts and subtitles.
     /// </summary>
     public class VideoInfo
     {
         /// <summary>
+        /// Initializes a new instance of the <see cref="VideoInfo" /> class.
+        /// </summary>
+        /// <param name="name">The name.</param>
+        public VideoInfo(string? name)
+        {
+            Name = name;
+
+            Files = [];
+            AlternateVersions = [];
+        }
+
+        /// <summary>
         /// Gets or sets the name.
         /// </summary>
         /// <value>The name.</value>
-        public string Name { get; set; }
+        public string? Name { get; set; }
+
         /// <summary>
         /// Gets or sets the year.
         /// </summary>
         /// <value>The year.</value>
         public int? Year { get; set; }
+
         /// <summary>
         /// Gets or sets the files.
         /// </summary>
         /// <value>The files.</value>
-        public List<VideoFileInfo> Files { get; set; }
+        public IReadOnlyList<VideoFileInfo> Files { get; set; }
+
         /// <summary>
-        /// Gets or sets the extras.
-        /// </summary>
-        /// <value>The extras.</value>
-        public List<VideoFileInfo> Extras { get; set; }
-        /// <summary>
-        /// Gets or sets the alternate versions.
+        /// Gets or sets the alternate versions. Each alternate may itself span multiple files.
         /// </summary>
         /// <value>The alternate versions.</value>
-        public List<VideoFileInfo> AlternateVersions { get; set; }
+        public IReadOnlyList<VideoInfo> AlternateVersions { get; set; }
 
-        public VideoInfo()
-        {
-            Files = new List<VideoFileInfo>();
-            Extras = new List<VideoFileInfo>();
-            AlternateVersions = new List<VideoFileInfo>();
-        }
+        /// <summary>
+        /// Gets or sets the extra type.
+        /// </summary>
+        public ExtraType? ExtraType { get; set; }
     }
 }

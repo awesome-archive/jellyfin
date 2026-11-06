@@ -1,413 +1,624 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
+using Jellyfin.Extensions;
+using Jellyfin.Extensions.Json;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Extensions;
 using MediaBrowser.Model.Globalization;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Localization
 {
     /// <summary>
-    /// Class LocalizationManager
+    /// Class LocalizationManager.
     /// </summary>
     public class LocalizationManager : ILocalizationManager
     {
-        /// <summary>
-        /// The _configuration manager
-        /// </summary>
-        private readonly IServerConfigurationManager _configurationManager;
-
-        /// <summary>
-        /// The us culture
-        /// </summary>
-        private static readonly CultureInfo UsCulture = new CultureInfo("en-US");
-
-        private readonly Dictionary<string, Dictionary<string, ParentalRating>> _allParentalRatings =
-            new Dictionary<string, Dictionary<string, ParentalRating>>(StringComparer.OrdinalIgnoreCase);
-
-        private readonly IFileSystem _fileSystem;
-        private readonly IJsonSerializer _jsonSerializer;
-        private readonly ILogger _logger;
+        private const string DefaultCulture = "en-US";
+        private const string RatingsPath = "Emby.Server.Implementations.Localization.Ratings.";
+        private const string CulturesPath = "Emby.Server.Implementations.Localization.iso6392.txt";
+        private const string CountriesPath = "Emby.Server.Implementations.Localization.countries.json";
+        private const string CoreResourcePrefix = "Emby.Server.Implementations.Localization.Core.";
         private static readonly Assembly _assembly = typeof(LocalizationManager).Assembly;
+        private static readonly string[] _unratedValues = ["n/a", "unrated", "not rated", "nr"];
+
+        private readonly IServerConfigurationManager _configurationManager;
+        private readonly ILogger<LocalizationManager> _logger;
+
+        private readonly Dictionary<string, Dictionary<string, ParentalRatingScore?>> _allParentalRatings = new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly ConcurrentDictionary<string, Dictionary<string, string>> _cultureOnlyDictionaries = new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
+
+        private readonly ConcurrentDictionary<string, CultureDto?> _cultureCache = new(StringComparer.OrdinalIgnoreCase);
+        private List<CultureDto> _cultures = [];
+
+        private static readonly (IReadOnlyList<LocalizationOption> Options, FrozenDictionary<string, string> Bcp47ToJellyfinMap) _localizationData = BuildLocalizationData();
+        private static readonly IReadOnlyList<LocalizationOption> _localizationOptions = _localizationData.Options;
+
+        // Maps BCP-47 hyphenated culture codes (set by ASP.NET Core's RequestLocalizationMiddleware
+        // and used as CurrentUICulture.Name) to Jellyfin's underscore-based resource file codes.
+        // Built reflexively from the resource file scan so both directions stay in sync.
+        private static readonly FrozenDictionary<string, string> _bcp47ToJellyfinMap = _localizationData.Bcp47ToJellyfinMap;
+
+        private FrozenDictionary<string, string> _iso6392BtoT = null!;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="LocalizationManager" /> class.
         /// </summary>
         /// <param name="configurationManager">The configuration manager.</param>
-        /// <param name="fileSystem">The file system.</param>
-        /// <param name="jsonSerializer">The json serializer.</param>
+        /// <param name="logger">The logger.</param>
         public LocalizationManager(
             IServerConfigurationManager configurationManager,
-            IFileSystem fileSystem,
-            IJsonSerializer jsonSerializer,
-            ILoggerFactory loggerFactory)
+            ILogger<LocalizationManager> logger)
         {
             _configurationManager = configurationManager;
-            _fileSystem = fileSystem;
-            _jsonSerializer = jsonSerializer;
-            _logger = loggerFactory.CreateLogger(nameof(LocalizationManager));
+            _logger = logger;
+
+            _configurationManager.ConfigurationUpdated += OnConfigurationUpdated;
         }
 
+        /// <summary>
+        /// Gets the supported UI cultures.
+        /// </summary>
+        /// <returns>A list of <see cref="CultureInfo"/> objects covering every embedded translation.</returns>
+        public static IList<CultureInfo> GetSupportedUICultures()
+        {
+            var cultures = new List<CultureInfo>();
+            foreach (var option in _localizationOptions)
+            {
+                // Skip novelty codes (e.g. "pr" Pirate, "jbo" Lojban) that .NET cannot resolve.
+                if (TryGetCultureInfo(option.Value, out var cultureInfo))
+                {
+                    cultures.Add(cultureInfo);
+                }
+            }
+
+            return cultures;
+        }
+
+        /// <summary>
+        /// Resolves a Jellyfin resource culture code (which may use underscores, e.g. <c>es_419</c>)
+        /// to a <see cref="CultureInfo"/>. Returns <see langword="false"/> for codes .NET cannot resolve.
+        /// </summary>
+        private static bool TryGetCultureInfo(string cultureCode, [NotNullWhen(true)] out CultureInfo? cultureInfo)
+        {
+            try
+            {
+                // Resource files use underscores for some variants (e.g. es_419);
+                // CultureInfo only accepts hyphenated BCP-47 codes.
+                cultureInfo = CultureInfo.GetCultureInfo(cultureCode.Replace('_', '-'));
+                return true;
+            }
+            catch (CultureNotFoundException)
+            {
+                cultureInfo = null;
+                return false;
+            }
+        }
+
+        private static void OnConfigurationUpdated(object? sender, EventArgs e)
+        {
+            if (sender is IServerConfigurationManager configManager)
+            {
+                var uiCulture = configManager.Configuration.UICulture;
+                if (!string.IsNullOrEmpty(uiCulture))
+                {
+                    CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo(uiCulture);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Loads all resources into memory.
+        /// </summary>
+        /// <returns><see cref="Task" />.</returns>
         public async Task LoadAll()
         {
-            const string ratingsResource = "Emby.Server.Implementations.Localization.Ratings.";
-
-            Directory.CreateDirectory(LocalizationPath);
-
-            var existingFiles = GetRatingsFiles(LocalizationPath).Select(Path.GetFileName);
-
             // Extract from the assembly
             foreach (var resource in _assembly.GetManifestResourceNames())
             {
-                if (!resource.StartsWith(ratingsResource))
+                if (!resource.StartsWith(RatingsPath, StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                string filename = "ratings-" + resource.Substring(ratingsResource.Length);
-
-                if (existingFiles.Contains(filename))
+                using var stream = _assembly.GetManifestResourceStream(resource);
+                if (stream is not null)
                 {
-                    continue;
-                }
+                    var ratingSystem = await JsonSerializer.DeserializeAsync<ParentalRatingSystem>(stream, _jsonOptions).ConfigureAwait(false)
+                                ?? throw new InvalidOperationException($"Invalid resource path: '{CountriesPath}'");
 
-                using (var stream = _assembly.GetManifestResourceStream(resource))
-                {
-                    string target = Path.Combine(LocalizationPath, filename);
-                    _logger.LogInformation("Extracting ratings to {0}", target);
-
-                    using (var fs = _fileSystem.GetFileStream(target, FileOpenMode.Create, FileAccessMode.Write, FileShareMode.Read))
+                    // Rating strings are compared case insensitively, providers are not consistent about casing (e.g. "VM18" vs "vm18")
+                    var dict = new Dictionary<string, ParentalRatingScore?>(StringComparer.OrdinalIgnoreCase);
+                    if (ratingSystem.Ratings is not null)
                     {
-                        await stream.CopyToAsync(fs);
+                        foreach (var ratingEntry in ratingSystem.Ratings)
+                        {
+                            foreach (var ratingString in ratingEntry.RatingStrings)
+                            {
+                                dict[ratingString] = ratingEntry.RatingScore;
+                            }
+                        }
+
+                        _allParentalRatings[ratingSystem.CountryCode] = dict;
                     }
                 }
             }
 
-            foreach (var file in GetRatingsFiles(LocalizationPath))
-            {
-                await LoadRatings(file);
-            }
-
-            LoadAdditionalRatings();
-
-            await LoadCultures();
+            await LoadCultures().ConfigureAwait(false);
         }
-
-        private void LoadAdditionalRatings()
-        {
-            LoadRatings("au", new[]
-            {
-                new ParentalRating("AU-G", 1),
-                new ParentalRating("AU-PG", 5),
-                new ParentalRating("AU-M", 6),
-                new ParentalRating("AU-MA15+", 7),
-                new ParentalRating("AU-M15+", 8),
-                new ParentalRating("AU-R18+", 9),
-                new ParentalRating("AU-X18+", 10),
-                new ParentalRating("AU-RC", 11)
-            });
-
-            LoadRatings("be", new[]
-            {
-                new ParentalRating("BE-AL", 1),
-                new ParentalRating("BE-MG6", 2),
-                new ParentalRating("BE-6", 3),
-                new ParentalRating("BE-9", 5),
-                new ParentalRating("BE-12", 6),
-                new ParentalRating("BE-16", 8)
-            });
-
-            LoadRatings("de", new[]
-            {
-                new ParentalRating("DE-0", 1),
-                new ParentalRating("FSK-0", 1),
-                new ParentalRating("DE-6", 5),
-                new ParentalRating("FSK-6", 5),
-                new ParentalRating("DE-12", 7),
-                new ParentalRating("FSK-12", 7),
-                new ParentalRating("DE-16", 8),
-                new ParentalRating("FSK-16", 8),
-                new ParentalRating("DE-18", 9),
-                new ParentalRating("FSK-18", 9)
-            });
-
-            LoadRatings("ru", new[]
-            {
-                new ParentalRating("RU-0+", 1),
-                new ParentalRating("RU-6+", 3),
-                new ParentalRating("RU-12+", 7),
-                new ParentalRating("RU-16+", 9),
-                new ParentalRating("RU-18+", 10)
-            });
-        }
-
-        private void LoadRatings(string country, ParentalRating[] ratings)
-        {
-            _allParentalRatings[country] = ratings.ToDictionary(i => i.Name);
-        }
-
-        private IEnumerable<string> GetRatingsFiles(string directory)
-            => _fileSystem.GetFilePaths(directory, false)
-                .Where(i => string.Equals(Path.GetExtension(i), ".csv", StringComparison.OrdinalIgnoreCase))
-                .Where(i => Path.GetFileName(i).StartsWith("ratings-", StringComparison.OrdinalIgnoreCase));
-
-        /// <summary>
-        /// Gets the localization path.
-        /// </summary>
-        /// <value>The localization path.</value>
-        public string LocalizationPath
-            => Path.Combine(_configurationManager.ApplicationPaths.ProgramDataPath, "localization");
-
-        public string NormalizeFormKD(string text)
-            => text.Normalize(NormalizationForm.FormKD);
-
-        private CultureDto[] _cultures;
 
         /// <summary>
         /// Gets the cultures.
         /// </summary>
-        /// <returns>IEnumerable{CultureDto}.</returns>
-        public CultureDto[] GetCultures()
+        /// <returns><see cref="IEnumerable{CultureDto}" />.</returns>
+        public IEnumerable<CultureDto> GetCultures()
             => _cultures;
 
         private async Task LoadCultures()
         {
-            List<CultureDto> list = new List<CultureDto>();
+            List<CultureDto> list = [];
+            Dictionary<string, string> iso6392BtoTdict = new Dictionary<string, string>();
 
-            const string path = "Emby.Server.Implementations.Localization.iso6392.txt";
-
-            using (var stream = _assembly.GetManifestResourceStream(path))
-            using (var reader = new StreamReader(stream))
+            using var stream = _assembly.GetManifestResourceStream(CulturesPath);
+            if (stream is null)
             {
-                while (!reader.EndOfStream)
+                throw new InvalidOperationException($"Invalid resource path: '{CulturesPath}'");
+            }
+            else
+            {
+                using var reader = new StreamReader(stream);
+                await foreach (var line in reader.ReadAllLinesAsync().ConfigureAwait(false))
                 {
-                    var line = await reader.ReadLineAsync();
-
                     if (string.IsNullOrWhiteSpace(line))
                     {
                         continue;
                     }
 
                     var parts = line.Split('|');
-
-                    if (parts.Length == 5)
+                    if (parts.Length != 5)
                     {
-                        string name = parts[3];
-                        if (string.IsNullOrWhiteSpace(name))
-                        {
-                            continue;
-                        }
-
-                        string twoCharName = parts[2];
-                        if (string.IsNullOrWhiteSpace(twoCharName))
-                        {
-                            continue;
-                        }
-
-                        string[] threeletterNames;
-                        if (string.IsNullOrWhiteSpace(parts[1]))
-                        {
-                            threeletterNames = new [] { parts[0] };
-                        }
-                        else
-                        {
-                            threeletterNames = new [] { parts[0], parts[1] };
-                        }
-
-                        list.Add(new CultureDto
-                        {
-                            DisplayName = name,
-                            Name = name,
-                            ThreeLetterISOLanguageNames = threeletterNames,
-                            TwoLetterISOLanguageName = twoCharName
-                        });
+                        throw new InvalidDataException($"Invalid culture data found at: '{line}'");
                     }
-                }
-            }
 
-            _cultures = list.ToArray();
-        }
-
-        public CultureDto FindLanguageInfo(string language)
-            => GetCultures()
-                .FirstOrDefault(i =>
-                    string.Equals(i.DisplayName, language, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(i.Name, language, StringComparison.OrdinalIgnoreCase)
-                    || i.ThreeLetterISOLanguageNames.Contains(language, StringComparer.OrdinalIgnoreCase)
-                    || string.Equals(i.TwoLetterISOLanguageName, language, StringComparison.OrdinalIgnoreCase));
-
-        /// <summary>
-        /// Gets the countries.
-        /// </summary>
-        /// <returns>IEnumerable{CountryInfo}.</returns>
-        public Task<CountryInfo[]> GetCountries()
-            => _jsonSerializer.DeserializeFromStreamAsync<CountryInfo[]>(
-                    _assembly.GetManifestResourceStream("Emby.Server.Implementations.Localization.countries.json"));
-
-        /// <summary>
-        /// Gets the parental ratings.
-        /// </summary>
-        /// <returns>IEnumerable{ParentalRating}.</returns>
-        public IEnumerable<ParentalRating> GetParentalRatings()
-            => GetParentalRatingsDictionary().Values;
-
-        /// <summary>
-        /// Gets the parental ratings dictionary.
-        /// </summary>
-        /// <returns>Dictionary{System.StringParentalRating}.</returns>
-        private Dictionary<string, ParentalRating> GetParentalRatingsDictionary()
-        {
-            var countryCode = _configurationManager.Configuration.MetadataCountryCode;
-
-            if (string.IsNullOrEmpty(countryCode))
-            {
-                countryCode = "us";
-            }
-
-           return GetRatings(countryCode) ?? GetRatings("us");
-        }
-
-        /// <summary>
-        /// Gets the ratings.
-        /// </summary>
-        /// <param name="countryCode">The country code.</param>
-        private Dictionary<string, ParentalRating> GetRatings(string countryCode)
-        {
-            _allParentalRatings.TryGetValue(countryCode, out var value);
-
-            return value;
-        }
-
-        /// <summary>
-        /// Loads the ratings.
-        /// </summary>
-        /// <param name="file">The file.</param>
-        /// <returns>Dictionary{System.StringParentalRating}.</returns>
-        private async Task LoadRatings(string file)
-        {
-            Dictionary<string, ParentalRating> dict
-                = new Dictionary<string, ParentalRating>(StringComparer.OrdinalIgnoreCase);
-
-            using (var str = File.OpenRead(file))
-            using (var reader = new StreamReader(str))
-            {
-                string line;
-                while ((line = await reader.ReadLineAsync()) != null)
-                {
-                    if (string.IsNullOrWhiteSpace(line))
+                    string name = parts[3];
+                    string displayname = parts[3];
+                    if (string.IsNullOrWhiteSpace(displayname))
                     {
                         continue;
                     }
 
-                    string[] parts = line.Split(',');
-                    if (parts.Length == 2
-                        && int.TryParse(parts[1], NumberStyles.Integer, UsCulture, out var value))
+                    string twoCharName = parts[2];
+                    if (string.IsNullOrWhiteSpace(twoCharName))
                     {
-                        dict.Add(parts[0], (new ParentalRating { Name = parts[0], Value = value }));
+                        twoCharName = string.Empty;
                     }
-#if DEBUG
+                    else if (twoCharName.Contains('-', StringComparison.OrdinalIgnoreCase))
+                    {
+                        name = twoCharName;
+                    }
+
+                    string[] threeLetterNames;
+                    if (string.IsNullOrWhiteSpace(parts[1]))
+                    {
+                        threeLetterNames = [parts[0]];
+                    }
                     else
                     {
-                        _logger.LogWarning("Misformed line in {Path}", file);
+                        threeLetterNames = [parts[0], parts[1]];
+
+                        // In cases where there are two TLN the first one is ISO 639-2/T and the second one is ISO 639-2/B
+                        // We need ISO 639-2/T for the .NET cultures so we cultivate a dictionary for the translation B->T
+                        iso6392BtoTdict.TryAdd(parts[1], parts[0]);
                     }
-#endif
+
+                    list.Add(new CultureDto(name, displayname, twoCharName, threeLetterNames));
                 }
+
+                _cultureCache.Clear();
+                _cultures = list;
+                _iso6392BtoT = iso6392BtoTdict.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
             }
-
-            var countryCode = Path.GetFileNameWithoutExtension(file).Split('-')[1];
-
-            _allParentalRatings[countryCode] = dict;
         }
 
-        private static readonly string[] _unratedValues = { "n/a", "unrated", "not rated" };
-
-        /// <summary>
-        /// Gets the rating level.
-        /// </summary>
-        public int? GetRatingLevel(string rating)
+        /// <inheritdoc />
+        public CultureDto? FindLanguageInfo(string language)
         {
-            if (string.IsNullOrEmpty(rating))
-            {
-                throw new ArgumentNullException(nameof(rating));
-            }
-
-            if (_unratedValues.Contains(rating, StringComparer.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(language))
             {
                 return null;
             }
 
-            // Fairly common for some users to have "Rated R" in their rating field
-            rating = rating.Replace("Rated ", string.Empty, StringComparison.OrdinalIgnoreCase);
-
-            var ratingsDictionary = GetParentalRatingsDictionary();
-
-            if (ratingsDictionary.TryGetValue(rating, out ParentalRating value))
-            {
-                return value.Value;
-            }
-
-            // If we don't find anything check all ratings systems
-            foreach (var dictionary in _allParentalRatings.Values)
-            {
-                if (dictionary.TryGetValue(rating, out value))
+            return _cultureCache.GetOrAdd(
+                language,
+                static (lang, cultures) =>
                 {
-                    return value.Value;
-                }
-            }
+                    // TODO language should ideally be a ReadOnlySpan but moq cannot mock ref structs
+                    for (var i = 0; i < cultures.Count; i++)
+                    {
+                        var culture = cultures[i];
+                        if (lang.Equals(culture.DisplayName, StringComparison.OrdinalIgnoreCase)
+                            || lang.Equals(culture.Name, StringComparison.OrdinalIgnoreCase)
+                            || culture.ThreeLetterISOLanguageNames.Contains(lang, StringComparison.OrdinalIgnoreCase)
+                            || lang.Equals(culture.TwoLetterISOLanguageName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return culture;
+                        }
+                    }
 
-            // Try splitting by : to handle "Germany: FSK 18"
-            var index = rating.IndexOf(':');
-            if (index != -1)
+                    return null;
+                },
+                _cultures);
+        }
+
+        /// <inheritdoc />
+        public string? GetLanguageDisplayName(string language)
+        {
+            if (string.IsNullOrEmpty(language))
             {
-                rating = rating.Substring(index).TrimStart(':').Trim();
-
-                if (!string.IsNullOrWhiteSpace(rating))
-                {
-                    return GetRatingLevel(rating);
-                }
+                return null;
             }
 
-            // TODO: Further improve by normalizing out all spaces and dashes
+            var displayName = FindLanguageInfo(language)?.DisplayName;
+            if (displayName is null)
+            {
+                return null;
+            }
+
+            // Truncate at the first delimiter to avoid cluttered display names
+            return displayName.Split([';', ','], StringSplitOptions.None)[0].Trim();
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<CountryInfo> GetCountries()
+        {
+            using var stream = _assembly.GetManifestResourceStream(CountriesPath) ?? throw new InvalidOperationException($"Invalid resource path: '{CountriesPath}'");
+
+            return JsonSerializer.Deserialize<IReadOnlyList<CountryInfo>>(stream, _jsonOptions) ?? [];
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<ParentalRating> GetParentalRatings()
+        {
+            // Use server default language for ratings
+            // Fall back to empty list if there are no parental ratings for that language
+            var ratings = GetParentalRatingsDictionary()?.Select(x => new ParentalRating(x.Key, x.Value)).ToList() ?? [];
+
+            // Add common ratings to ensure them being available for selection
+            // Based on the US rating system due to it being the main source of rating in the metadata providers
+            // Unrated
+            if (!ratings.Any(x => x is null))
+            {
+                ratings.Add(new("Unrated", null));
+            }
+
+            // Minimum rating possible
+            if (ratings.All(x => x.RatingScore?.Score != 0))
+            {
+                ratings.Add(new("Approved", new(0, null)));
+            }
+
+            // Matches PG (this has different age restrictions depending on country)
+            if (ratings.All(x => x.RatingScore?.Score != 10))
+            {
+                ratings.Add(new("10", new(10, null)));
+            }
+
+            // Matches PG-13
+            if (ratings.All(x => x.RatingScore?.Score != 13))
+            {
+                ratings.Add(new("13", new(13, null)));
+            }
+
+            // Matches TV-14
+            if (ratings.All(x => x.RatingScore?.Score != 14))
+            {
+                ratings.Add(new("14", new(14, null)));
+            }
+
+            // Catchall if max rating of country is less than 21
+            // Using 21 instead of 18 to be sure to allow access to all rated content except adult and banned
+            if (!ratings.Any(x => x.RatingScore?.Score >= 21))
+            {
+                ratings.Add(new ParentalRating("21", new(21, null)));
+            }
+
+            // A lot of countries don't explicitly have a separate rating for adult content
+            if (ratings.All(x => x.RatingScore?.Score != 1000))
+            {
+                ratings.Add(new ParentalRating("XXX", new(1000, null)));
+            }
+
+            // A lot of countries don't explicitly have a separate rating for banned content
+            if (ratings.All(x => x.RatingScore?.Score != 1001))
+            {
+                ratings.Add(new ParentalRating("Banned", new(1001, null)));
+            }
+
+            return [.. ratings.OrderBy(r => r.RatingScore?.Score).ThenBy(r => r.RatingScore?.SubScore)];
+        }
+
+        /// <summary>
+        /// Gets the parental ratings dictionary.
+        /// </summary>
+        /// <param name="countryCode">The optional two letter ISO language string.</param>
+        /// <returns><see cref="Dictionary{String, ParentalRatingScore}" />.</returns>
+        private Dictionary<string, ParentalRatingScore?>? GetParentalRatingsDictionary(string? countryCode = null)
+        {
+            // Fallback to server default if no country code is specified.
+            if (string.IsNullOrEmpty(countryCode))
+            {
+                countryCode = _configurationManager.Configuration.MetadataCountryCode;
+            }
+
+            if (_allParentalRatings.TryGetValue(countryCode, out var countryValue))
+            {
+                return countryValue;
+            }
+
             return null;
         }
 
-        public bool HasUnicodeCategory(string value, UnicodeCategory category)
+        /// <inheritdoc />
+        public ParentalRatingScore? GetRatingScore(string rating, string? countryCode = null)
         {
-            foreach (var chr in value)
+            ArgumentException.ThrowIfNullOrEmpty(rating);
+
+            // Handle unrated content. This has to happen before the split below,
+            // because some of the unrated values contain a '/' themselves (e.g. "n/a").
+            if (IsUnrated(rating))
             {
-                if (char.GetUnicodeCategory(chr) == category)
+                return null;
+            }
+
+            // Several rating systems contain a '/' inside a single rating (e.g. "M/12" in PT,
+            // "U/A 13+" in IN, "7/i/fig" in ES), so the value as a whole always wins over the split below.
+            var wholeValueScore = GetSingleRatingScore(rating, countryCode);
+            if (wholeValueScore is not null)
+            {
+                return wholeValueScore;
+            }
+
+            // Some providers may list multiple ratings separated by '/' (e.g. "SE:15 / SE:15+ / SE:Från 15 år").
+            // Try each one in order and use the first that resolves.
+            var ratingValues = rating.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (ratingValues.Length == 1)
+            {
+                return null;
+            }
+
+            var hasUnknownRating = false;
+            foreach (var ratingValue in ratingValues)
+            {
+                // A single entry of such a list may be unrated while a later one still resolves
+                if (IsUnrated(ratingValue))
                 {
-                    return true;
+                    continue;
+                }
+
+                // An unknown entry is not worth a warning of its own as long as another entry still resolves
+                var score = GetSingleRatingScore(ratingValue, countryCode, logUnknownRating: false);
+                if (score is not null)
+                {
+                    return score;
+                }
+
+                hasUnknownRating = true;
+            }
+
+            if (hasUnknownRating)
+            {
+                _logger.LogWarning(
+                    "None of the ratings in '{Rating}' were found in a known rating system, treating as unrated",
+                    rating);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Checks whether a rating value marks the content as unrated.
+        /// </summary>
+        /// <param name="rating">Rating value to check.</param>
+        /// <returns>Returns true if the value is an unrated marker.</returns>
+        private static bool IsUnrated(ReadOnlySpan<char> rating)
+            => _unratedValues.Contains(rating.Trim(), StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Resolves a single rating value to a score.
+        /// </summary>
+        private ParentalRatingScore? GetSingleRatingScore(string rating, string? countryCode, bool logUnknownRating = true)
+        {
+            // Convert ints directly
+            // This may override some of the locale specific age ratings (but those always map to the same age)
+            if (TryParseRatingAsScore(rating, out var ratingAge))
+            {
+                return new(ratingAge, null);
+            }
+
+            // Fairly common for some users to have "Rated R" in their rating field
+            rating = rating.Replace("Rated :", string.Empty, StringComparison.OrdinalIgnoreCase)
+                            .Replace("Rated:", string.Empty, StringComparison.OrdinalIgnoreCase)
+                            .Replace("Rated ", string.Empty, StringComparison.OrdinalIgnoreCase)
+                            .Trim();
+
+            // Use rating system matching the language
+            if (!string.IsNullOrEmpty(countryCode))
+            {
+                var ratingsDictionary = GetParentalRatingsDictionary(countryCode);
+                if (ratingsDictionary is not null && ratingsDictionary.TryGetValue(rating, out ParentalRatingScore? value))
+                {
+                    return value;
+                }
+
+                if (ratingsDictionary is not null && rating.Length > countryCode.Length
+                    && rating.StartsWith(countryCode, StringComparison.OrdinalIgnoreCase)
+                    && (rating[countryCode.Length] == '-' || rating[countryCode.Length] == ':')
+                    && ratingsDictionary.TryGetValue(rating[(countryCode.Length + 1)..].Trim(), out var normalizedValue))
+                {
+                    return normalizedValue;
+                }
+            }
+            else
+            {
+                // Fall back to server default language for ratings check
+                var ratingsDictionary = GetParentalRatingsDictionary();
+                if (ratingsDictionary is not null && ratingsDictionary.TryGetValue(rating, out ParentalRatingScore? value))
+                {
+                    return value;
                 }
             }
 
-            return false;
+            // If we don't find anything, check all ratings systems, starting with US
+            if (_allParentalRatings.TryGetValue("us", out var usRatings) && usRatings.TryGetValue(rating, out var usValue))
+            {
+                return usValue;
+            }
+
+            foreach (var dictionary in _allParentalRatings.Values)
+            {
+                if (dictionary.TryGetValue(rating, out var value))
+                {
+                    return value;
+                }
+            }
+
+            // Try splitting by country prefix separator to handle "US:PG-13", "Germany: FSK-18", "DE-FSK-18".
+            // A '/' marks a list of ratings, which this would split into the first entry's country and the last entry's rating
+            if (!rating.Contains('/', StringComparison.Ordinal)
+                && (TryGetRatingScoreBySeparator(rating, ':', logUnknownRating, out var result)
+                    || TryGetRatingScoreBySeparator(rating, '-', logUnknownRating, out result)))
+            {
+                return result;
+            }
+
+            return null;
         }
 
+        private bool TryGetRatingScoreBySeparator(string rating, char separator, bool logUnknownRating, out ParentalRatingScore? result)
+        {
+            result = null;
+
+            if (rating.IndexOf(separator, StringComparison.Ordinal) < 0)
+            {
+                return false;
+            }
+
+            var ratingSpan = rating.AsSpan();
+            var countryPart = ratingSpan.LeftPart(separator).Trim().ToString();
+            var ratingPart = ratingSpan.RightPart(separator).Trim().ToString();
+            if (ratingPart.Length == 0)
+            {
+                return false;
+            }
+
+            string? resolvedCountryCode = null;
+
+            if (_allParentalRatings.ContainsKey(countryPart))
+            {
+                resolvedCountryCode = countryPart;
+            }
+            else
+            {
+                var culture = FindLanguageInfo(countryPart);
+                if (culture is not null)
+                {
+                    resolvedCountryCode = culture.TwoLetterISOLanguageName;
+                }
+            }
+
+            if (resolvedCountryCode is not null
+                && _allParentalRatings.TryGetValue(resolvedCountryCode, out var countryRatings))
+            {
+                if (countryRatings.TryGetValue(ratingPart, out result))
+                {
+                    return true;
+                }
+
+                // If it's not a recognized rating string, fall back to using the number as the score
+                if (TryParseRatingAsScore(ratingPart, out var numericScore))
+                {
+                    result = new ParentalRatingScore(numericScore, null);
+                    return true;
+                }
+
+                // Explicitly unrated content (e.g. "IT-NR") is unrated by definition, not a lookup failure
+                if (IsUnrated(ratingPart))
+                {
+                    return true;
+                }
+
+                if (logUnknownRating)
+                {
+                    _logger.LogWarning(
+                        "Rating '{Rating}' not found in the '{CountryCode}' rating system, treating as unrated",
+                        rating,
+                        resolvedCountryCode);
+                }
+
+                return true;
+            }
+
+            // Country not identified or no rating data available, try recursive lookup
+            result = GetRatingScore(ratingPart, resolvedCountryCode);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Tries to parse a rating as a number, allowing an optional trailing '+' (e.g. "16" or "18+")
+        /// or a leading '-' (e.g. the French "-12").
+        /// </summary>
+        /// <param name="ratingValue">Rating value to parse.</param>
+        /// <param name="score">Parsed score.</param>
+        /// <returns>Returns true if parsing was successful.</returns>
+        private static bool TryParseRatingAsScore(ReadOnlySpan<char> ratingValue, out int score)
+        {
+            // A leading '-' marks a minimum age ("-12" is French for "not for under 12s"), never a negative score
+            var trimmed = ratingValue.TrimStart('-').TrimEnd('+');
+            return int.TryParse(trimmed, out score);
+        }
+
+        /// <inheritdoc />
         public string GetLocalizedString(string phrase)
+        {
+            return GetLocalizedString(phrase, CultureInfo.CurrentUICulture.Name);
+        }
+
+        /// <inheritdoc />
+        public string GetServerLocalizedString(string phrase)
         {
             return GetLocalizedString(phrase, _configurationManager.Configuration.UICulture);
         }
 
+        /// <inheritdoc />
         public string GetLocalizedString(string phrase, string culture)
         {
             if (string.IsNullOrEmpty(culture))
             {
                 culture = _configurationManager.Configuration.UICulture;
             }
+
             if (string.IsNullOrEmpty(culture))
             {
                 culture = DefaultCulture;
+            }
+
+            // Normalize BCP-47 hyphenated codes to Jellyfin's underscore-based codes
+            if (_bcp47ToJellyfinMap.TryGetValue(culture, out var mapped))
+            {
+                culture = mapped;
             }
 
             var dictionary = GetLocalizationDictionary(culture);
@@ -417,73 +628,63 @@ namespace Emby.Server.Implementations.Localization
                 return value;
             }
 
+            if (!string.Equals(culture, DefaultCulture, StringComparison.OrdinalIgnoreCase))
+            {
+                var fallback = GetLocalizationDictionary(DefaultCulture);
+                if (fallback.TryGetValue(phrase, out var fallbackValue))
+                {
+                    return fallbackValue;
+                }
+            }
+
             return phrase;
         }
 
-        private const string DefaultCulture = "en-US";
-
-        private readonly ConcurrentDictionary<string, Dictionary<string, string>> _dictionaries =
-            new ConcurrentDictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-
-        public Dictionary<string, string> GetLocalizationDictionary(string culture)
+        private Dictionary<string, string> GetLocalizationDictionary(string culture)
         {
-            if (string.IsNullOrEmpty(culture))
-            {
-                throw new ArgumentNullException(nameof(culture));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(culture);
 
-            const string prefix = "Core";
-            var key = prefix + culture;
+            return _cultureOnlyDictionaries.GetOrAdd(
+                culture,
+                static (key, localizationManager) =>
+                {
+                    var dictionary = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var namespaceName = localizationManager.GetType().Namespace + ".Core";
+                    localizationManager.CopyInto(dictionary, namespaceName + "." + GetResourceFilename(key)).GetAwaiter().GetResult();
 
-            return _dictionaries.GetOrAdd(key,
-                    f => GetDictionary(prefix, culture, DefaultCulture + ".json").GetAwaiter().GetResult());
-        }
-
-        private async Task<Dictionary<string, string>> GetDictionary(string prefix, string culture, string baseFilename)
-        {
-            if (string.IsNullOrEmpty(culture))
-            {
-                throw new ArgumentNullException(nameof(culture));
-            }
-
-            var dictionary = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            var namespaceName = GetType().Namespace + "." + prefix;
-
-            await CopyInto(dictionary, namespaceName + "." + baseFilename);
-            await CopyInto(dictionary, namespaceName + "." + GetResourceFilename(culture));
-
-            return dictionary;
+                    return dictionary;
+                },
+                this);
         }
 
         private async Task CopyInto(IDictionary<string, string> dictionary, string resourcePath)
         {
-            using (var stream = _assembly.GetManifestResourceStream(resourcePath))
+            using var stream = _assembly.GetManifestResourceStream(resourcePath);
+            // If a Culture doesn't have a translation the stream will be null and it defaults to en-us further up the chain
+            if (stream is null)
             {
-                // If a Culture doesn't have a translation the stream will be null and it defaults to en-us further up the chain
-                if (stream != null)
-                {
-                    var dict = await _jsonSerializer.DeserializeFromStreamAsync<Dictionary<string, string>>(stream);
+                _logger.LogError("Missing translation/culture resource: {ResourcePath}", resourcePath);
+                return;
+            }
 
-                    foreach (var key in dict.Keys)
-                    {
-                        dictionary[key] = dict[key];
-                    }
-                }
-                else
-                {
-                    _logger.LogError("Missing translation/culture resource: {ResourcePath}", resourcePath);
-                }
+            var dict = await JsonSerializer.DeserializeAsync<Dictionary<string, string>>(stream, _jsonOptions).ConfigureAwait(false) ?? throw new InvalidOperationException($"Resource contains invalid data: '{stream}'");
+            foreach (var key in dict.Keys)
+            {
+                dictionary[key] = dict[key];
             }
         }
 
         private static string GetResourceFilename(string culture)
         {
-            var parts = culture.Split('-');
+            // Region codes may use a '-' (BCP-47, e.g. "pt-BR") or '_' (e.g. "es_419", "ar_SA") separator.
+            // Normalize the casing (lower-case language, upper-case region) while preserving the separator
+            // so the result matches the embedded resource file name, which is case-sensitive.
+            var separatorIndex = culture.IndexOfAny(['-', '_']);
 
-            if (parts.Length == 2)
+            if (separatorIndex > 0)
             {
-                culture = parts[0].ToLowerInvariant() + "-" + parts[1].ToUpperInvariant();
+                var separator = culture[separatorIndex];
+                culture = culture[..separatorIndex].ToLowerInvariant() + separator + culture[(separatorIndex + 1)..].ToUpperInvariant();
             }
             else
             {
@@ -493,45 +694,79 @@ namespace Emby.Server.Implementations.Localization
             return culture + ".json";
         }
 
-        public LocalizationOption[] GetLocalizationOptions()
-            => new LocalizationOption[]
+        /// <inheritdoc />
+        public IEnumerable<LocalizationOption> GetLocalizationOptions()
+        {
+            return _localizationOptions;
+        }
+
+        private static (IReadOnlyList<LocalizationOption> Options, FrozenDictionary<string, string> Bcp47ToJellyfinMap) BuildLocalizationData()
+        {
+            var options = new List<LocalizationOption>();
+            var bcp47Map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var prefix = CoreResourcePrefix;
+
+            foreach (var resource in _assembly.GetManifestResourceNames())
             {
-                new LocalizationOption("Arabic", "ar"),
-                new LocalizationOption("Bulgarian (Bulgaria)", "bg-BG"),
-                new LocalizationOption("Catalan", "ca"),
-                new LocalizationOption("Chinese Simplified", "zh-CN"),
-                new LocalizationOption("Chinese Traditional", "zh-TW"),
-                new LocalizationOption("Croatian", "hr"),
-                new LocalizationOption("Czech", "cs"),
-                new LocalizationOption("Danish", "da"),
-                new LocalizationOption("Dutch", "nl"),
-                new LocalizationOption("English (United Kingdom)", "en-GB"),
-                new LocalizationOption("English (United States)", "en-US"),
-                new LocalizationOption("French", "fr"),
-                new LocalizationOption("French (Canada)", "fr-CA"),
-                new LocalizationOption("German", "de"),
-                new LocalizationOption("Greek", "el"),
-                new LocalizationOption("Hebrew", "he"),
-                new LocalizationOption("Hungarian", "hu"),
-                new LocalizationOption("Italian", "it"),
-                new LocalizationOption("Kazakh", "kk"),
-                new LocalizationOption("Korean", "ko"),
-                new LocalizationOption("Lithuanian", "lt-LT"),
-                new LocalizationOption("Malay", "ms"),
-                new LocalizationOption("Norwegian Bokmål", "nb"),
-                new LocalizationOption("Persian", "fa"),
-                new LocalizationOption("Polish", "pl"),
-                new LocalizationOption("Portuguese (Brazil)", "pt-BR"),
-                new LocalizationOption("Portuguese (Portugal)", "pt-PT"),
-                new LocalizationOption("Russian", "ru"),
-                new LocalizationOption("Slovak", "sk"),
-                new LocalizationOption("Slovenian (Slovenia)", "sl-SI"),
-                new LocalizationOption("Spanish", "es"),
-                new LocalizationOption("Spanish (Argentina)", "es-AR"),
-                new LocalizationOption("Spanish (Mexico)", "es-MX"),
-                new LocalizationOption("Swedish", "sv"),
-                new LocalizationOption("Swiss German", "gsw"),
-                new LocalizationOption("Turkish", "tr")
-            };
+                if (!resource.StartsWith(prefix, StringComparison.Ordinal)
+                    || !resource.EndsWith(".json", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // Extract culture code from resource name: "...Core.de.json" -> "de", "...Core.pt-BR.json" -> "pt-BR"
+                var code = resource[prefix.Length..^5];
+
+                // Record the BCP-47 → Jellyfin mapping for any resource file using underscores.
+                if (code.Contains('_', StringComparison.Ordinal))
+                {
+                    bcp47Map[code.Replace('_', '-')] = code;
+                }
+
+                // Skip the base language file — en-US is added explicitly below
+                if (code.Equals(DefaultCulture, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var displayName = GetDisplayName(code);
+                options.Add(new LocalizationOption(displayName, code));
+            }
+
+            // Ensure en-US is always present
+            options.Add(new LocalizationOption("English", DefaultCulture));
+
+            options.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            return (options, bcp47Map.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static string GetDisplayName(string cultureCode)
+        {
+            // Custom/novelty codes like "pr" (Pirate) — fall back to code itself
+            return TryGetCultureInfo(cultureCode, out var cultureInfo)
+                ? cultureInfo.NativeName
+                : cultureCode;
+        }
+
+        /// <inheritdoc />
+        public bool TryGetISO6392TFromB(string isoB, [NotNullWhen(true)] out string? isoT)
+        {
+            // Unlikely case the dictionary is not (yet) initialized properly
+            if (_iso6392BtoT is null)
+            {
+                isoT = null;
+                return false;
+            }
+
+            var result = _iso6392BtoT.TryGetValue(isoB, out isoT) && !string.IsNullOrEmpty(isoT);
+
+            // Ensure the ISO code being null if the result is false
+            if (!result)
+            {
+                isoT = null;
+            }
+
+            return result;
+        }
     }
 }
